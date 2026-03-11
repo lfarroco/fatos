@@ -34,6 +34,13 @@ export type Mutation = readonly [
 	value: unknown
 ];
 
+export type QueryTerm = string | number | boolean | null;
+export type QueryClause = readonly [entity: QueryTerm, attribute: string, value: QueryTerm];
+export type QuerySpec = {
+	find: string[];
+	where: QueryClause[];
+};
+
 type EntityState = Record<string, unknown> & { id: number };
 
 type EAVTIndex = Map<number, Map<string, Fact[]>>;
@@ -55,6 +62,10 @@ function valueKey(value: unknown): string {
 	}
 
 	return `${type}:${String(value)}`;
+}
+
+function isVariable(term: QueryTerm): term is string {
+	return typeof term === 'string' && term.startsWith('?');
 }
 
 export class FactDatabase {
@@ -214,6 +225,109 @@ export class FactDatabase {
 		}
 
 		return matches;
+	}
+
+	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
+		const triples = this.materializedTriples(tx);
+		let bindings: Array<Record<string, QueryTerm>> = [{}];
+
+		for (const [entityTerm, attribute, valueTerm] of spec.where) {
+			const nextBindings: Array<Record<string, QueryTerm>> = [];
+
+			for (const binding of bindings) {
+				for (const [eid, factAttribute, value] of triples) {
+					if (factAttribute !== attribute) {
+						continue;
+					}
+
+					const withEntity = this.bindTerm(binding, entityTerm, eid);
+					if (!withEntity) {
+						continue;
+					}
+
+					const withValue = this.bindTerm(withEntity, valueTerm, value);
+					if (!withValue) {
+						continue;
+					}
+
+					nextBindings.push(withValue);
+				}
+			}
+
+			bindings = nextBindings;
+		}
+
+		const seen = new Set<string>();
+		const rows: QueryTerm[][] = [];
+		for (const binding of bindings) {
+			const row = spec.find.map((term) => {
+				if (isVariable(term as QueryTerm)) {
+					return binding[term] ?? null;
+				}
+
+				return term as QueryTerm;
+			});
+
+			const rowKey = JSON.stringify(row);
+			if (seen.has(rowKey)) {
+				continue;
+			}
+
+			seen.add(rowKey);
+			rows.push(row);
+		}
+
+		return rows;
+	}
+
+	private bindTerm(
+		binding: Record<string, QueryTerm>,
+		term: QueryTerm,
+		actualValue: QueryTerm
+	): Record<string, QueryTerm> | null {
+		if (!isVariable(term)) {
+			return Object.is(term, actualValue) ? binding : null;
+		}
+
+		if (!(term in binding)) {
+			return {
+				...binding,
+				[term]: actualValue
+			};
+		}
+
+		return Object.is(binding[term], actualValue) ? binding : null;
+	}
+
+	private materializedTriples(tx?: number): Array<[number, string, QueryTerm]> {
+		const txLimit = normalizeTxLimit(tx);
+		const eids = new Set<number>();
+
+		for (const [eid, , , factTx] of this.facts) {
+			if (factTx <= txLimit) {
+				eids.add(eid);
+			}
+		}
+
+		const triples: Array<[number, string, QueryTerm]> = [];
+		for (const eid of eids) {
+			const entity = this.entity(eid, txLimit);
+			if (!entity) {
+				continue;
+			}
+
+			for (const [attribute, value] of Object.entries(entity)) {
+				if (attribute === 'id') {
+					continue;
+				}
+
+				if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
+					triples.push([eid, attribute, value]);
+				}
+			}
+		}
+
+		return triples;
 	}
 }
 

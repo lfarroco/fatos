@@ -392,7 +392,7 @@ packages/
 - [x] Fact storage and management
 - [x] Transactions and transaction log
 - [x] Index structures (EAVT, AEVT, AVET)
-- [ ] Query engine (Datalog-style)
+- [x] Query engine (Datalog-style)
 
 ### Phase 2: Client implementation
 

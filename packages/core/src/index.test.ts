@@ -102,4 +102,57 @@ describe('@fatos/core', () => {
 			[2, 'type', 'user', 1, 'add']
 		]);
 	});
+
+	it('supports datalog-style queries with joins', () => {
+		const db = createDatabase();
+		db.transact([
+			['add', 1, 'type', 'user'],
+			['add', 1, 'name', 'Alice'],
+			['add', 2, 'type', 'user'],
+			['add', 2, 'name', 'Bob'],
+			['add', 3, 'type', 'admin'],
+			['add', 3, 'name', 'Root']
+		]);
+
+		expect(
+			db.query({
+				find: ['?e'],
+				where: [['?e', 'type', 'user']]
+			})
+		).toEqual([[1], [2]]);
+
+		expect(
+			db.query({
+				find: ['?name'],
+				where: [
+					['?e', 'type', 'user'],
+					['?e', 'name', '?name']
+				]
+			})
+		).toEqual([['Alice'], ['Bob']]);
+	});
+
+	it('evaluates queries against transaction snapshots', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user');
+		db.add(1, 'name', 'Alice');
+		db.retract(1, 'type', 'user');
+
+		expect(
+			db.query(
+				{
+					find: ['?e'],
+					where: [['?e', 'type', 'user']]
+				},
+				2
+			)
+		).toEqual([[1]]);
+
+		expect(
+			db.query({
+				find: ['?e'],
+				where: [['?e', 'type', 'user']]
+			})
+		).toEqual([]);
+	});
 });
