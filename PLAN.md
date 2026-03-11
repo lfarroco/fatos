@@ -393,6 +393,7 @@ packages/
 - [x] Transactions and transaction log
 - [x] Index structures (EAVT, AEVT, AVET)
 - [x] Query engine (Datalog-style)
+- [x] Schema as facts (`db/ident`, `db/valueType`, `db/cardinality`) with collection support (`cardinality: many`)
 
 ### Phase 2: Client implementation
 

@@ -155,4 +155,54 @@ describe('@fatos/core', () => {
 			})
 		).toEqual([]);
 	});
+
+	it('declares schema using facts via object transact input', () => {
+		const db = createDatabase();
+
+		db.transact([
+			{
+				ident: 'user/name',
+				valueType: 'string',
+				cardinality: 'one'
+			}
+		]);
+
+		const schemaFacts = db.getFactsByAttribute('db/ident');
+		expect(schemaFacts).toHaveLength(1);
+		expect(schemaFacts[0]?.[2]).toBe('user/name');
+		expect(db.getFactsByAttribute('db/valueType')[0]?.[2]).toBe('string');
+		expect(db.getFactsByAttribute('db/cardinality')[0]?.[2]).toBe('one');
+	});
+
+	it('supports cardinality many collection attributes', () => {
+		const db = createDatabase();
+		db.transact([
+			{ ident: 'user/tags', valueType: 'string', cardinality: 'many' }
+		]);
+
+		db.transact([
+			['add', 42, 'user/tags', 'typescript'],
+			['add', 42, 'user/tags', 'datomic']
+		]);
+
+		expect(db.entity(42)).toEqual({ id: 42, 'user/tags': ['typescript', 'datomic'] });
+		expect(
+			db.query({
+				find: ['?e'],
+				where: [['?e', 'user/tags', 'datomic']]
+			})
+		).toEqual([[42]]);
+
+		db.retract(42, 'user/tags', 'datomic');
+		expect(db.entity(42)).toEqual({ id: 42, 'user/tags': ['typescript'] });
+	});
+
+	it('validates valueType and cardinality one constraints from schema', () => {
+		const db = createDatabase();
+		db.transact([{ ident: 'user/age', valueType: 'number', cardinality: 'one' }]);
+
+		db.add(7, 'user/age', 33);
+		expect(() => db.add(7, 'user/age', 'thirty-three')).toThrow(/Invalid value type/);
+		expect(() => db.add(7, 'user/age', 34)).toThrow(/Cardinality conflict/);
+	});
 });

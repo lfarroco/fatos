@@ -34,6 +34,24 @@ export type Mutation = readonly [
 	value: unknown
 ];
 
+export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'unknown';
+export type Cardinality = 'one' | 'many';
+
+export type SchemaDeclaration = {
+	ident: string;
+	valueType: ValueType;
+	cardinality: Cardinality;
+};
+
+export type TransactionEntry = Mutation | SchemaDeclaration;
+
+type AttributeSchema = {
+	eid: number;
+	ident: string;
+	valueType: ValueType;
+	cardinality: Cardinality;
+};
+
 export type QueryTerm = string | number | boolean | null;
 export type QueryClause = readonly [entity: QueryTerm, attribute: string, value: QueryTerm];
 export type QuerySpec = {
@@ -68,6 +86,22 @@ function isVariable(term: QueryTerm): term is string {
 	return typeof term === 'string' && term.startsWith('?');
 }
 
+function isSchemaDeclaration(entry: TransactionEntry): entry is SchemaDeclaration {
+	return !Array.isArray(entry);
+}
+
+function matchesValueType(value: unknown, valueType: ValueType): boolean {
+	if (valueType === 'unknown') {
+		return true;
+	}
+
+	if (valueType === 'null') {
+		return value === null;
+	}
+
+	return typeof value === valueType;
+}
+
 export class FactDatabase {
 	private facts: Fact[] = [];
 	private transactions: TransactionRecord[] = [];
@@ -75,6 +109,9 @@ export class FactDatabase {
 	private aevt: AEVTIndex = new Map();
 	private avet: AVETIndex = new Map();
 	private nextTx = 1;
+	private nextSchemaEid = -1;
+	private attributeSchemas = new Map<string, AttributeSchema>();
+	private schemaByIdent = new Map<string, number>();
 
 	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
 		const tx = this.nextTx++;
@@ -111,22 +148,38 @@ export class FactDatabase {
 	}
 
 	add(eid: number, attribute: string, value: unknown): Fact {
-		const [tx] = this.commitTransaction();
-		return this.appendFact(tx, 'add', eid, attribute, value);
+		const facts = this.transact([['add', eid, attribute, value]]);
+		return facts[0] as Fact;
 	}
 
 	retract(eid: number, attribute: string, value: unknown): Fact {
-		const [tx] = this.commitTransaction();
-		return this.appendFact(tx, 'retract', eid, attribute, value);
+		const facts = this.transact([['retract', eid, attribute, value]]);
+		return facts[0] as Fact;
 	}
 
-	transact(mutations: Mutation[], metadata?: Record<string, unknown>): Fact[] {
-		if (mutations.length === 0) {
+	transact(entries: TransactionEntry[], metadata?: Record<string, unknown>): Fact[] {
+		if (entries.length === 0) {
 			return [];
 		}
 
+		const mutations: Mutation[] = [];
+		for (const entry of entries) {
+			if (isSchemaDeclaration(entry)) {
+				mutations.push(...this.schemaDeclarationToFacts(entry));
+				continue;
+			}
+
+			mutations.push(entry);
+		}
+
+		this.validateMutations(mutations);
+
 		const [tx] = this.commitTransaction(metadata);
-		return mutations.map(([op, eid, attribute, value]) => this.appendFact(tx, op, eid, attribute, value));
+		return mutations.map(([op, eid, attribute, value]) => {
+			const fact = this.appendFact(tx, op, eid, attribute, value);
+			this.onFactCommitted(fact);
+			return fact;
+		});
 	}
 
 	getFacts(): readonly Fact[] {
@@ -175,10 +228,29 @@ export class FactDatabase {
 
 	entity(eid: number, tx?: number): EntityState | null {
 		const txLimit = normalizeTxLimit(tx);
-		const state = new Map<string, unknown>();
+		const state = new Map<string, unknown | Set<unknown>>();
 
 		for (const [factEid, attribute, value, factTx, op] of this.facts) {
 			if (factEid !== eid || factTx > txLimit) {
+				continue;
+			}
+
+			const schema = this.attributeSchemas.get(attribute);
+			if (schema?.cardinality === 'many') {
+				const current = state.get(attribute);
+				const values = current instanceof Set ? current : new Set<unknown>();
+
+				if (op === 'add') {
+					values.add(value);
+				} else {
+					values.delete(value);
+				}
+
+				if (values.size === 0) {
+					state.delete(attribute);
+				} else {
+					state.set(attribute, values);
+				}
 				continue;
 			}
 
@@ -195,6 +267,11 @@ export class FactDatabase {
 
 		const entity: EntityState = { id: eid };
 		for (const [attribute, value] of state) {
+			if (value instanceof Set) {
+				entity[attribute] = Array.from(value);
+				continue;
+			}
+
 			entity[attribute] = value;
 		}
 
@@ -321,6 +398,15 @@ export class FactDatabase {
 					continue;
 				}
 
+				if (Array.isArray(value)) {
+					for (const item of value) {
+						if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean' || item === null) {
+							triples.push([eid, attribute, item]);
+						}
+					}
+					continue;
+				}
+
 				if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
 					triples.push([eid, attribute, value]);
 				}
@@ -328,6 +414,135 @@ export class FactDatabase {
 		}
 
 		return triples;
+	}
+
+	private schemaDeclarationToFacts(schema: SchemaDeclaration): Mutation[] {
+		const existingSchema = this.attributeSchemas.get(schema.ident);
+		if (existingSchema) {
+			if (existingSchema.valueType !== schema.valueType || existingSchema.cardinality !== schema.cardinality) {
+				throw new Error(`Schema conflict for ${schema.ident}`);
+			}
+
+			return [];
+		}
+
+		const schemaEid = this.nextSchemaEid--;
+		return [
+			['add', schemaEid, 'db/ident', schema.ident],
+			['add', schemaEid, 'db/valueType', schema.valueType],
+			['add', schemaEid, 'db/cardinality', schema.cardinality]
+		];
+	}
+
+	private onFactCommitted(fact: Fact): void {
+		const [eid, attribute, value, , op] = fact;
+		if (op !== 'add') {
+			return;
+		}
+
+		if (attribute === 'db/ident' && typeof value === 'string') {
+			this.schemaByIdent.set(value, eid);
+			this.attributeSchemas.set(value, {
+				eid,
+				ident: value,
+				valueType: 'unknown',
+				cardinality: 'one'
+			});
+			return;
+		}
+
+		const ident = [...this.schemaByIdent.entries()].find(([, schemaEid]) => schemaEid === eid)?.[0];
+		if (!ident) {
+			return;
+		}
+
+		const schema = this.attributeSchemas.get(ident);
+		if (!schema) {
+			return;
+		}
+
+		if (attribute === 'db/valueType' && typeof value === 'string') {
+			schema.valueType = value as ValueType;
+		}
+
+		if (attribute === 'db/cardinality' && (value === 'one' || value === 'many')) {
+			schema.cardinality = value;
+		}
+	}
+
+	private validateMutations(mutations: Mutation[]): void {
+		const manyState = new Map<string, Set<unknown>>();
+		const oneState = new Map<string, unknown>();
+
+		for (const [op, eid, attribute, value] of mutations) {
+			const schema = this.attributeSchemas.get(attribute);
+			if (!schema) {
+				continue;
+			}
+
+			if (!matchesValueType(value, schema.valueType)) {
+				throw new Error(`Invalid value type for ${attribute}. Expected ${schema.valueType}`);
+			}
+
+			const key = `${eid}:${attribute}`;
+			if (schema.cardinality === 'many') {
+				const current = manyState.get(key) ?? new Set(this.activeValues(eid, attribute));
+				if (op === 'add') {
+					current.add(value);
+				} else {
+					current.delete(value);
+				}
+				manyState.set(key, current);
+				continue;
+			}
+
+			const current = oneState.has(key) ? oneState.get(key) : this.activeValues(eid, attribute)[0];
+			if (op === 'add') {
+				if (current !== undefined && !Object.is(current, value)) {
+					throw new Error(`Cardinality conflict for ${attribute}: expected one value`);
+				}
+				oneState.set(key, value);
+				continue;
+			}
+
+			if (current !== undefined && Object.is(current, value)) {
+				oneState.delete(key);
+			}
+		}
+	}
+
+	private activeValues(eid: number, attribute: string): unknown[] {
+		const schema = this.attributeSchemas.get(attribute);
+		if (schema?.cardinality === 'many') {
+			const values = new Set<unknown>();
+			for (const [factEid, factAttr, value, , op] of this.facts) {
+				if (factEid !== eid || factAttr !== attribute) {
+					continue;
+				}
+
+				if (op === 'add') {
+					values.add(value);
+				} else {
+					values.delete(value);
+				}
+			}
+			return Array.from(values);
+		}
+
+		let current: unknown | undefined;
+		for (const [factEid, factAttr, value, , op] of this.facts) {
+			if (factEid !== eid || factAttr !== attribute) {
+				continue;
+			}
+
+			if (op === 'add') {
+				current = value;
+			} else if (current !== undefined && Object.is(current, value)) {
+				current = undefined;
+			}
+		}
+
+		return current === undefined ? [] : [current];
 	}
 }
 
