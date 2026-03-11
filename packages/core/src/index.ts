@@ -52,6 +52,13 @@ type AttributeSchema = {
 	cardinality: Cardinality;
 };
 
+export type SchemaInfo = {
+	eid: number;
+	ident: string;
+	valueType: ValueType;
+	cardinality: Cardinality;
+};
+
 export type QueryTerm = string | number | boolean | null;
 export type QueryClause = readonly [entity: QueryTerm, attribute: string, value: QueryTerm];
 export type QuerySpec = {
@@ -224,6 +231,31 @@ export class FactDatabase {
 
 	getTransactions(): readonly TransactionRecord[] {
 		return this.transactions.slice();
+	}
+
+	getSchema(ident: string): SchemaInfo | null {
+		const schema = this.attributeSchemas.get(ident);
+		if (!schema) {
+			return null;
+		}
+
+		return {
+			eid: schema.eid,
+			ident: schema.ident,
+			valueType: schema.valueType,
+			cardinality: schema.cardinality
+		};
+	}
+
+	getSchemas(): SchemaInfo[] {
+		return [...this.attributeSchemas.values()]
+			.map((schema) => ({
+				eid: schema.eid,
+				ident: schema.ident,
+				valueType: schema.valueType,
+				cardinality: schema.cardinality
+			}))
+			.sort((left, right) => left.ident.localeCompare(right.ident));
 	}
 
 	entity(eid: number, tx?: number): EntityState | null {

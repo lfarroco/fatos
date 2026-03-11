@@ -205,4 +205,42 @@ describe('@fatos/core', () => {
 		expect(() => db.add(7, 'user/age', 'thirty-three')).toThrow(/Invalid value type/);
 		expect(() => db.add(7, 'user/age', 34)).toThrow(/Cardinality conflict/);
 	});
+
+	it('exposes schema by ident', () => {
+		const db = createDatabase();
+		db.transact([
+			{ ident: 'user/name', valueType: 'string', cardinality: 'one' }
+		]);
+
+		expect(db.getSchema('user/name')).toEqual({
+			eid: expect.any(Number),
+			ident: 'user/name',
+			valueType: 'string',
+			cardinality: 'one'
+		});
+		expect(db.getSchema('missing/attr')).toBeNull();
+	});
+
+	it('lists all schemas sorted by ident', () => {
+		const db = createDatabase();
+		db.transact([
+			{ ident: 'user/tags', valueType: 'string', cardinality: 'many' },
+			{ ident: 'user/age', valueType: 'number', cardinality: 'one' }
+		]);
+
+		expect(db.getSchemas()).toEqual([
+			{
+				eid: expect.any(Number),
+				ident: 'user/age',
+				valueType: 'number',
+				cardinality: 'one'
+			},
+			{
+				eid: expect.any(Number),
+				ident: 'user/tags',
+				valueType: 'string',
+				cardinality: 'many'
+			}
+		]);
+	});
 });
