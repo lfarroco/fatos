@@ -80,4 +80,26 @@ describe('@fatos/core', () => {
 			{ id: 11, type: 'user' }
 		]);
 	});
+
+	it('provides indexed fact lookups through EAVT, AEVT, and AVET', () => {
+		const db = createDatabase();
+		db.transact([
+			['add', 1, 'type', 'user'],
+			['add', 1, 'age', 22],
+			['add', 2, 'type', 'user'],
+			['add', 2, 'age', 30],
+			['add', 3, 'type', 'admin']
+		]);
+
+		expect(db.getFactsByEntityAttribute(1, 'age')).toEqual([[1, 'age', 22, 1, 'add']]);
+		expect(db.getFactsByAttribute('type')).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[2, 'type', 'user', 1, 'add'],
+			[3, 'type', 'admin', 1, 'add']
+		]);
+		expect(db.getFactsByAttributeValue('type', 'user')).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[2, 'type', 'user', 1, 'add']
+		]);
+	});
 });

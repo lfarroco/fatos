@@ -36,13 +36,33 @@ export type Mutation = readonly [
 
 type EntityState = Record<string, unknown> & { id: number };
 
+type EAVTIndex = Map<number, Map<string, Fact[]>>;
+type AEVTIndex = Map<string, Map<number, Fact[]>>;
+type AVETIndex = Map<string, Map<string, Fact[]>>;
+
 function normalizeTxLimit(tx?: number): number {
 	return tx ?? Number.POSITIVE_INFINITY;
+}
+
+function valueKey(value: unknown): string {
+	if (value === null) {
+		return 'null';
+	}
+
+	const type = typeof value;
+	if (type === 'object' || type === 'function') {
+		return `${type}:${JSON.stringify(value)}`;
+	}
+
+	return `${type}:${String(value)}`;
 }
 
 export class FactDatabase {
 	private facts: Fact[] = [];
 	private transactions: TransactionRecord[] = [];
+	private eavt: EAVTIndex = new Map();
+	private aevt: AEVTIndex = new Map();
+	private avet: AVETIndex = new Map();
 	private nextTx = 1;
 
 	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
@@ -56,6 +76,26 @@ export class FactDatabase {
 	private appendFact(tx: number, op: FactOperation, eid: number, attribute: string, value: unknown): Fact {
 		const fact: Fact = [eid, attribute, value, tx, op];
 		this.facts.push(fact);
+
+		const entityAttributes = this.eavt.get(eid) ?? new Map<string, Fact[]>();
+		const eavtFacts = entityAttributes.get(attribute) ?? [];
+		eavtFacts.push(fact);
+		entityAttributes.set(attribute, eavtFacts);
+		this.eavt.set(eid, entityAttributes);
+
+		const attributeEntities = this.aevt.get(attribute) ?? new Map<number, Fact[]>();
+		const aevtFacts = attributeEntities.get(eid) ?? [];
+		aevtFacts.push(fact);
+		attributeEntities.set(eid, aevtFacts);
+		this.aevt.set(attribute, attributeEntities);
+
+		const attributeValues = this.avet.get(attribute) ?? new Map<string, Fact[]>();
+		const avetKey = valueKey(value);
+		const avetFacts = attributeValues.get(avetKey) ?? [];
+		avetFacts.push(fact);
+		attributeValues.set(avetKey, avetFacts);
+		this.avet.set(attribute, attributeValues);
+
 		return fact;
 	}
 
@@ -83,11 +123,39 @@ export class FactDatabase {
 	}
 
 	getFactsByEntity(eid: number): readonly Fact[] {
-		return this.facts.filter((fact) => fact[0] === eid);
+		const entityAttributes = this.eavt.get(eid);
+		if (!entityAttributes) {
+			return [];
+		}
+
+		const facts: Fact[] = [];
+		for (const attributeFacts of entityAttributes.values()) {
+			facts.push(...attributeFacts);
+		}
+
+		return facts.sort((left, right) => left[3] - right[3]);
 	}
 
 	getFactsByAttribute(attribute: string): readonly Fact[] {
-		return this.facts.filter((fact) => fact[1] === attribute);
+		const attributeEntities = this.aevt.get(attribute);
+		if (!attributeEntities) {
+			return [];
+		}
+
+		const facts: Fact[] = [];
+		for (const entityFacts of attributeEntities.values()) {
+			facts.push(...entityFacts);
+		}
+
+		return facts.sort((left, right) => left[3] - right[3]);
+	}
+
+	getFactsByEntityAttribute(eid: number, attribute: string): readonly Fact[] {
+		return this.eavt.get(eid)?.get(attribute)?.slice() ?? [];
+	}
+
+	getFactsByAttributeValue(attribute: string, value: unknown): readonly Fact[] {
+		return this.avet.get(attribute)?.get(valueKey(value))?.slice() ?? [];
 	}
 
 	getTransactions(): readonly TransactionRecord[] {
