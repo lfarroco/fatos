@@ -21,6 +21,19 @@ export type Fact = readonly [
 	op: FactOperation
 ];
 
+export type TransactionRecord = readonly [
+	tx: number,
+	timestamp: number,
+	metadata: Record<string, unknown> | null
+];
+
+export type Mutation = readonly [
+	op: FactOperation,
+	eid: number,
+	attribute: string,
+	value: unknown
+];
+
 type EntityState = Record<string, unknown> & { id: number };
 
 function normalizeTxLimit(tx?: number): number {
@@ -29,18 +42,40 @@ function normalizeTxLimit(tx?: number): number {
 
 export class FactDatabase {
 	private facts: Fact[] = [];
+	private transactions: TransactionRecord[] = [];
 	private nextTx = 1;
 
-	add(eid: number, attribute: string, value: unknown): Fact {
-		const fact: Fact = [eid, attribute, value, this.nextTx++, 'add'];
+	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
+		const tx = this.nextTx++;
+		const timestamp = Date.now();
+		const transaction: TransactionRecord = [tx, timestamp, metadata ?? null];
+		this.transactions.push(transaction);
+		return transaction;
+	}
+
+	private appendFact(tx: number, op: FactOperation, eid: number, attribute: string, value: unknown): Fact {
+		const fact: Fact = [eid, attribute, value, tx, op];
 		this.facts.push(fact);
 		return fact;
 	}
 
+	add(eid: number, attribute: string, value: unknown): Fact {
+		const [tx] = this.commitTransaction();
+		return this.appendFact(tx, 'add', eid, attribute, value);
+	}
+
 	retract(eid: number, attribute: string, value: unknown): Fact {
-		const fact: Fact = [eid, attribute, value, this.nextTx++, 'retract'];
-		this.facts.push(fact);
-		return fact;
+		const [tx] = this.commitTransaction();
+		return this.appendFact(tx, 'retract', eid, attribute, value);
+	}
+
+	transact(mutations: Mutation[], metadata?: Record<string, unknown>): Fact[] {
+		if (mutations.length === 0) {
+			return [];
+		}
+
+		const [tx] = this.commitTransaction(metadata);
+		return mutations.map(([op, eid, attribute, value]) => this.appendFact(tx, op, eid, attribute, value));
 	}
 
 	getFacts(): readonly Fact[] {
@@ -53,6 +88,10 @@ export class FactDatabase {
 
 	getFactsByAttribute(attribute: string): readonly Fact[] {
 		return this.facts.filter((fact) => fact[1] === attribute);
+	}
+
+	getTransactions(): readonly TransactionRecord[] {
+		return this.transactions.slice();
 	}
 
 	entity(eid: number, tx?: number): EntityState | null {

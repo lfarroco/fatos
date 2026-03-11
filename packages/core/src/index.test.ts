@@ -21,6 +21,11 @@ describe('@fatos/core', () => {
 		expect(second).toEqual([1, 'age', 22, 2, 'add']);
 		expect(third).toEqual([1, 'age', 22, 3, 'retract']);
 		expect(db.getFacts()).toEqual([first, second, third]);
+		expect(db.getTransactions()).toEqual([
+			[1, expect.any(Number), null],
+			[2, expect.any(Number), null],
+			[3, expect.any(Number), null]
+		]);
 	});
 
 	it('builds entity state from add/retract facts', () => {
@@ -49,6 +54,30 @@ describe('@fatos/core', () => {
 		expect(db.find({ type: 'user' }, 4)).toEqual([
 			{ id: 1, type: 'user', name: 'Alice' },
 			{ id: 2, type: 'user', name: 'Bob' }
+		]);
+	});
+
+	it('supports grouped transactions with metadata', () => {
+		const db = createDatabase();
+
+		const facts = db.transact(
+			[
+				['add', 10, 'type', 'user'],
+				['add', 10, 'name', 'Charlie'],
+				['add', 11, 'type', 'user']
+			],
+			{ source: 'test' }
+		);
+
+		expect(facts).toEqual([
+			[10, 'type', 'user', 1, 'add'],
+			[10, 'name', 'Charlie', 1, 'add'],
+			[11, 'type', 'user', 1, 'add']
+		]);
+		expect(db.getTransactions()).toEqual([[1, expect.any(Number), { source: 'test' }]]);
+		expect(db.find({ type: 'user' })).toEqual([
+			{ id: 10, type: 'user', name: 'Charlie' },
+			{ id: 11, type: 'user' }
 		]);
 	});
 });
