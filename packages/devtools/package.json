@@ -1,0 +1,41 @@
+{
+	"name": "@fatos/devtools",
+	"version": "0.0.1",
+	"description": "DevTools components and utilities for Fatos inspector",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsup src/index.ts --format esm --dts --sourcemap",
+		"dev": "tsup src/index.ts --format esm --dts --sourcemap --watch",
+		"test": "vitest",
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
+	},
+	"keywords": [
+		"devtools",
+		"inspector",
+		"browser-extension",
+		"debug"
+	],
+	"author": "",
+	"license": "MIT",
+	"dependencies": {
+		"@fatos/client": "file:../client"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0"
+	}
+}

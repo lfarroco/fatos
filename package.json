@@ -1,0 +1,29 @@
+{
+	"name": "fatos",
+	"version": "0.0.1",
+	"description": "Temporal fact database system for client and server applications",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "npm run build --workspaces",
+		"dev": "npm run dev --workspaces",
+		"test": "npm run test --workspaces",
+		"lint": "npm run lint --workspaces",
+		"types": "npm run types --workspaces"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0",
+		"eslint": "^8.55.0",
+		"@typescript-eslint/eslint-plugin": "^6.13.0",
+		"@typescript-eslint/parser": "^6.13.0"
+	},
+	"engines": {
+		"node": ">=18.0.0"
+	}
+}

@@ -1,0 +1,54 @@
+{
+	"name": "@fatos/persistence",
+	"version": "0.0.1",
+	"description": "Storage adapters and persistence layer for Fatos",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./postgres": {
+			"types": "./dist/adapters/postgres.d.ts",
+			"import": "./dist/adapters/postgres.js"
+		},
+		"./mongodb": {
+			"types": "./dist/adapters/mongodb.d.ts",
+			"import": "./dist/adapters/mongodb.js"
+		},
+		"./file": {
+			"types": "./dist/adapters/file.d.ts",
+			"import": "./dist/adapters/file.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsup src/index.ts src/adapters/*.ts --format esm --dts --sourcemap",
+		"dev": "tsup src/index.ts src/adapters/*.ts --format esm --dts --sourcemap --watch",
+		"test": "vitest",
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
+	},
+	"keywords": [
+		"database",
+		"persistence",
+		"storage",
+		"postgres",
+		"mongodb"
+	],
+	"author": "",
+	"license": "MIT",
+	"dependencies": {
+		"@fatos/core": "file:../core"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0"
+	}
+}

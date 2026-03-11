@@ -1,0 +1,46 @@
+{
+	"name": "@fatos/react",
+	"version": "0.0.1",
+	"description": "React integration for Fatos temporal fact database",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsup src/index.ts --format esm --dts --sourcemap",
+		"dev": "tsup src/index.ts --format esm --dts --sourcemap --watch",
+		"test": "vitest",
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
+	},
+	"keywords": [
+		"database",
+		"temporal",
+		"react",
+		"hooks"
+	],
+	"author": "",
+	"license": "MIT",
+	"peerDependencies": {
+		"react": ">=18.0.0"
+	},
+	"dependencies": {
+		"@fatos/client": "file:../client"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"@types/react": "^18.2.0",
+		"react": "^18.2.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0"
+	}
+}

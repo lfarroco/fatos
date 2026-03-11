@@ -1,0 +1,10 @@
+{
+	"manifest_version": 3,
+	"name": "Fatos DevTools",
+	"version": "0.0.1",
+	"description": "DevTools extension for Fatos temporal fact database",
+	"permissions": [
+		"devtools"
+	],
+	"devtools_page": "devtools.html"
+}

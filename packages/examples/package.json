@@ -1,0 +1,30 @@
+{
+	"name": "@fatos/examples",
+	"version": "0.0.1",
+	"description": "Example applications using Fatos",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "tsup src/index.ts --format esm --dts --sourcemap",
+		"dev": "echo 'Examples are ready to run'",
+		"test": "vitest"
+	},
+	"keywords": [
+		"examples",
+		"tutorial"
+	],
+	"author": "",
+	"license": "MIT",
+	"dependencies": {
+		"@fatos/core": "file:../core",
+		"@fatos/client": "file:../client",
+		"@fatos/server": "file:../server",
+		"@fatos/react": "file:../react"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0"
+	}
+}

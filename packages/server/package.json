@@ -1,0 +1,43 @@
+{
+	"name": "@fatos/server",
+	"version": "0.0.1",
+	"description": "Node.js server for Fatos temporal fact database",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsup src/index.ts --format esm --dts --sourcemap",
+		"dev": "tsup src/index.ts --format esm --dts --sourcemap --watch",
+		"start": "node dist/index.js",
+		"test": "vitest",
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
+	},
+	"keywords": [
+		"database",
+		"temporal",
+		"server",
+		"node.js"
+	],
+	"author": "",
+	"license": "MIT",
+	"dependencies": {
+		"@fatos/core": "file:../core",
+		"@fatos/persistence": "file:../persistence"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"typescript": "^5.3.3",
+		"tsup": "^8.0.0",
+		"vitest": "^1.0.0"
+	}
+}
