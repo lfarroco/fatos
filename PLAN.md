@@ -389,10 +389,10 @@ packages/
 
 ### Phase 1: Core database (shared across client/server)
 
-- Fact storage and management
-- Transactions and transaction log
-- Index structures (EAVT, AEVT, AVET)
-- Query engine (Datalog-style)
+- [x] Fact storage and management
+- [ ] Transactions and transaction log
+- [ ] Index structures (EAVT, AEVT, AVET)
+- [ ] Query engine (Datalog-style)
 
 ### Phase 2: Client implementation
 
