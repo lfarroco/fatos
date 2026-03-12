@@ -397,9 +397,9 @@ packages/
 
 ### Phase 2: Client implementation
 
-- Browser API and in-memory store
-- React integration and hooks
-- Reactive queries
+- [x] Browser API and in-memory store
+- [x] React integration and hooks
+- [x] Reactive queries
 
 ### Phase 3: Server implementation
 
