@@ -403,9 +403,10 @@ packages/
 
 ### Phase 3: Server implementation
 
-- Node.js server with HTTP/WebSocket
-- Multi-client coordination
-- Real-time synchronization
+- [x] Node.js server with HTTP API
+- [ ] WebSocket transport
+- [x] Multi-client coordination
+- [x] Real-time synchronization
 
 ### Phase 4: DevTools
 
