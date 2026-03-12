@@ -3,8 +3,26 @@
 	"name": "Fatos DevTools",
 	"version": "0.0.1",
 	"description": "DevTools extension for Fatos temporal fact database",
+	"background": {
+		"service_worker": "background.global.js"
+	},
 	"permissions": [
-		"devtools"
+		"devtools",
+		"tabs"
+	],
+	"host_permissions": [
+		"<all_urls>"
+	],
+	"content_scripts": [
+		{
+			"matches": [
+				"<all_urls>"
+			],
+			"js": [
+				"content.global.js"
+			],
+			"run_at": "document_start"
+		}
 	],
 	"devtools_page": "devtools.html"
 }

@@ -5,8 +5,8 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"build": "tsup src/background.ts src/panel.ts src/content.ts --format iife --dts --sourcemap --splitting=false",
-		"dev": "tsup src/background.ts src/panel.ts src/content.ts --format iife --dts --sourcemap --splitting=false --watch",
+		"build": "tsup src/background.ts src/panel.ts src/panel-ui.ts src/content.ts --format iife --dts --sourcemap --splitting=false --public-dir src",
+		"dev": "tsup src/background.ts src/panel.ts src/panel-ui.ts src/content.ts --format iife --dts --sourcemap --splitting=false --public-dir src --watch",
 		"test": "vitest",
 		"lint": "eslint src"
 	},

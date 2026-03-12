@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Fatos Panel</title>
+	<style>
+		:root {
+			font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+			color: #0f172a;
+			background: #f8fafc;
+		}
+
+		body {
+			margin: 0;
+			padding: 12px;
+		}
+
+		header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			margin-bottom: 12px;
+		}
+
+		button {
+			border: 1px solid #334155;
+			background: #0f172a;
+			color: #f8fafc;
+			padding: 6px 10px;
+			border-radius: 6px;
+			cursor: pointer;
+		}
+
+		#meta {
+			font-size: 12px;
+			line-height: 1.4;
+			color: #334155;
+			margin-bottom: 8px;
+		}
+
+		pre {
+			margin: 0;
+			padding: 10px;
+			background: #e2e8f0;
+			border-radius: 8px;
+			max-height: calc(100vh - 120px);
+			overflow: auto;
+		}
+	</style>
+</head>
+<body>
+	<header>
+		<strong id="status">booting...</strong>
+		<button id="inspect-btn" type="button">Request Snapshot</button>
+	</header>
+	<div id="meta">
+		<div id="updated-at">last update: waiting for events</div>
+		<div id="event-type">latest event: none</div>
+	</div>
+	<pre id="payload">null</pre>
+	<script src="panel-ui.global.js"></script>
+</body>
+</html>

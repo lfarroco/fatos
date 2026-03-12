@@ -410,7 +410,7 @@ packages/
 
 ### Phase 4: DevTools
 
-- Browser extension
+- [x] Browser extension
 - Fact inspector UI
 - Query console
 - Timeline visualization
