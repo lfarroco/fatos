@@ -4,6 +4,9 @@
 
 type ChromeLike = {
 	devtools?: {
+		inspectedWindow?: {
+			tabId?: number;
+		};
 		panels?: {
 			create: (title: string, iconPath: string, pagePath: string, callback: (panel: unknown) => void) => void;
 		};
@@ -21,7 +24,10 @@ function initDevtoolsPanel(): void {
 		return;
 	}
 
-	panels.create('Fatos', '', 'panel.html', (_panel: unknown) => {
+	const tabId = chromeApi?.devtools?.inspectedWindow?.tabId;
+	const panelPath = typeof tabId === 'number' ? `panel.html?tabId=${tabId}` : 'panel.html';
+
+	panels.create('Fatos', '', panelPath, (_panel: unknown) => {
 		// The panel page handles runtime communication directly.
 	});
 }
