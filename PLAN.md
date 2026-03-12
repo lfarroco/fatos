@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fatos is a lightweight temporal fact database system for building scalable, time-aware applications. It can run **client-side in browsers** and **server-side** as a backend service, both written in **TypeScript**.
+Fatos is a lightweight temporal fact database system for building small applications. It can run **client-side in browsers** and **server-side** as a backend service, both written in **TypeScript**.
 
 The database stores application state as immutable facts rather than mutable objects. This enables powerful capabilities such as:
 
