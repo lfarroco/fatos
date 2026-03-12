@@ -11,6 +11,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server as NodeServer, type ServerResponse } from 'node:http';
+import { WebSocketServer, type WebSocket } from 'ws';
 import {
 	createDatabase,
 	type Fact,
@@ -110,6 +111,8 @@ export class FatosServer {
 	private db = createDatabase();
 	private server: NodeServer | null = null;
 	private listeners = new Set<(event: ServerEvent) => void>();
+	private websocketServer: WebSocketServer | null = null;
+	private websocketEventUnsubscribe: Unsubscribe | null = null;
 
 	start(options: StartOptions = {}): Promise<ServerAddress> {
 		if (this.server) {
@@ -123,6 +126,28 @@ export class FatosServer {
 			void this.handleRequest(req, res);
 		});
 
+		this.websocketServer = new WebSocketServer({ noServer: true });
+		this.server.on('upgrade', (req, socket, head) => {
+			if (!this.websocketServer) {
+				socket.destroy();
+				return;
+			}
+
+			const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+			if (requestUrl.pathname !== '/ws') {
+				socket.destroy();
+				return;
+			}
+
+			this.websocketServer.handleUpgrade(req, socket, head, (client) => {
+				this.websocketServer?.emit('connection', client, req);
+			});
+		});
+
+		this.websocketEventUnsubscribe = this.subscribe((event) => {
+			this.broadcastWebSocketEvent(event);
+		});
+
 		return new Promise((resolve, reject) => {
 			this.server?.once('error', reject);
 			this.server?.listen(port, host, () => {
@@ -133,6 +158,19 @@ export class FatosServer {
 	}
 
 	stop(): Promise<void> {
+		if (this.websocketEventUnsubscribe) {
+			this.websocketEventUnsubscribe();
+			this.websocketEventUnsubscribe = null;
+		}
+
+		if (this.websocketServer) {
+			for (const client of this.websocketServer.clients) {
+				client.close();
+			}
+			this.websocketServer.close();
+			this.websocketServer = null;
+		}
+
 		if (!this.server) {
 			return Promise.resolve();
 		}
@@ -177,6 +215,24 @@ export class FatosServer {
 	private emit(event: ServerEvent): void {
 		for (const listener of this.listeners) {
 			listener(event);
+		}
+	}
+
+	private sendWebSocketEvent(client: WebSocket, event: ServerEvent): void {
+		if (client.readyState !== 1) {
+			return;
+		}
+
+		client.send(JSON.stringify(event));
+	}
+
+	private broadcastWebSocketEvent(event: ServerEvent): void {
+		if (!this.websocketServer) {
+			return;
+		}
+
+		for (const client of this.websocketServer.clients) {
+			this.sendWebSocketEvent(client, event);
 		}
 	}
 

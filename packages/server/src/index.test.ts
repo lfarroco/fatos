@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import WebSocket from 'ws';
 import { createFatosServer, version } from './index';
 
 describe('@fatos/server', () => {
@@ -119,5 +120,56 @@ describe('@fatos/server', () => {
 			'fact:added',
 			'transaction:committed'
 		]);
+	});
+
+	it('streams realtime events over WebSocket transport', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const httpBaseUrl = `http://${host}:${port}`;
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		const socket = new WebSocket(wsUrl);
+		const receivedTypes: string[] = [];
+
+		try {
+			await new Promise<void>((resolve, reject) => {
+				socket.once('open', () => resolve());
+				socket.once('error', reject);
+			});
+
+			socket.on('message', (message) => {
+				const payload = JSON.parse(message.toString()) as { type?: string };
+				if (payload.type) {
+					receivedTypes.push(payload.type);
+				}
+			});
+
+			await fetch(`${httpBaseUrl}/facts`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ op: 'add', eid: 99, attribute: 'type', value: 'user' })
+			});
+
+			await new Promise<void>((resolve, reject) => {
+				const timeout = setTimeout(() => reject(new Error('Timed out waiting for websocket events')), 1000);
+				const check = () => {
+					if (receivedTypes.includes('fact:added') && receivedTypes.includes('transaction:committed')) {
+						clearTimeout(timeout);
+						resolve();
+						return;
+					}
+
+					setTimeout(check, 10);
+				};
+
+				check();
+			});
+
+			expect(receivedTypes).toContain('fact:added');
+			expect(receivedTypes).toContain('transaction:committed');
+		} finally {
+			socket.close();
+			await server.stop();
+		}
 	});
 });
