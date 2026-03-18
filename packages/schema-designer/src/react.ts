@@ -154,41 +154,50 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 
 	const selectedEntity = selectedEntityId ? entityById.get(selectedEntityId) ?? null : null;
 
-		const relationshipLayouts = React.useMemo(() => {
-			return document.schema.relationships.map((relationship, index) => {
-				const fromEntity = entityById.get(relationship.fromEntityId);
-				const toEntity = entityById.get(relationship.toEntityId);
+	const relationshipLayouts = React.useMemo(() => {
+		return document.schema.relationships.map((relationship, index) => {
+			const fromEntity = entityById.get(relationship.fromEntityId);
+			const toEntity = entityById.get(relationship.toEntityId);
 
-				if (!fromEntity || !toEntity) {
-					return {
-						relationship,
-						startX: 24,
-						startY: 24 + index * 22,
-						endX: 200,
-						endY: 24 + index * 22,
-						labelX: 28,
-						labelY: 8 + index * 22
-					};
-				}
-
-				const startX = fromEntity.position.x + 230;
-				const startY = fromEntity.position.y + 30;
-				const endX = toEntity.position.x;
-				const endY = toEntity.position.y + 30;
-				const labelX = (startX + endX) / 2 - 70;
-				const labelY = (startY + endY) / 2 - 16 + (index % 3) * 12;
-
+			if (!fromEntity || !toEntity) {
+				const startX = 24;
+				const startY = 24 + index * 22;
+				const endX = 200;
+				const endY = 24 + index * 22;
+				const bendX = 112;
 				return {
 					relationship,
 					startX,
 					startY,
 					endX,
 					endY,
-					labelX,
-					labelY
+					bendX,
+					labelX: bendX + 6,
+					labelY: startY - 16
 				};
-			});
-		}, [document.schema.relationships, entityById]);
+			}
+
+			const startX = fromEntity.position.x + 230;
+			const startY = fromEntity.position.y + 30;
+			const endX = toEntity.position.x;
+			const endY = toEntity.position.y + 30;
+			const bendOffset = ((index % 3) - 1) * 18;
+			const bendX = startX + (endX - startX) / 2 + bendOffset;
+			const labelX = bendX + 6;
+			const labelY = (startY + endY) / 2 - 16;
+
+			return {
+				relationship,
+				startX,
+				startY,
+				endX,
+				endY,
+				bendX,
+				labelX,
+				labelY
+			};
+		});
+	}, [document.schema.relationships, entityById]);
 
 	const onCanvasMouseMove = React.useCallback(
 		(event: React.MouseEvent<HTMLDivElement>) => {
@@ -487,14 +496,13 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 						React.createElement(
 							'g',
 							{ key: `line-${layout.relationship.id}` },
-							React.createElement('line', {
-								x1: layout.startX,
-								y1: layout.startY,
-								x2: layout.endX,
-								y2: layout.endY,
+							React.createElement('path', {
+								d: `M ${layout.startX} ${layout.startY} L ${layout.bendX} ${layout.startY} L ${layout.bendX} ${layout.endY} L ${layout.endX} ${layout.endY}`,
 								stroke: '#0f766e',
 								strokeWidth: 2,
-								strokeDasharray: '4 4'
+								strokeDasharray: '4 4',
+								strokeLinejoin: 'round',
+								fill: 'none'
 							}),
 							React.createElement('circle', {
 								cx: layout.startX,
