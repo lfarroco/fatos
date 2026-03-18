@@ -12,7 +12,8 @@
 		"dev": "npm run dev --workspaces",
 		"test": "npm run test --workspaces",
 		"lint": "npm run lint --workspaces",
-		"types": "npm run types --workspaces"
+		"types": "npm run types --workspaces",
+		"schema-designer:run": "npm run preview --workspace @fatos/schema-designer"
 	},
 	"devDependencies": {
 		"@types/node": "^20.10.0",

@@ -383,7 +383,7 @@ packages/
 | `react`            | React hooks and components                                     |
 | `devtools`         | Inspection UI components and DevTools extension                |
 | `chrome-extension` | Browser extension wrapper                                      |
-| `schema-designer`  | Visual schema modeler, import/export adapters, JSON contracts |
+| `schema-designer`  | Visual schema modeler, import/export adapters, JSON contracts  |
 | `persistence`      | Database adapters (PostgreSQL, MongoDB, Firebase, etc.)        |
 | `examples`         | Sample applications demonstrating usage                        |
 
@@ -435,7 +435,7 @@ packages/
 - [x] Define schema-designer JSON v1 document model and validation helpers
 - [x] Add conversion from schema-designer documents to Fatos transaction entries
 - [x] Add conversion from Fatos snapshot payloads (schemas + entities) to schema-designer documents
-- [ ] Scaffold React canvas shell with draggable entity nodes
+- [x] Scaffold React canvas shell with draggable entity nodes
 - [ ] Add relationship editing flow (one-to-one, one-to-many, many-to-many)
 - [ ] Integrate file import/export UI in DevTools panel
 - [ ] Add round-trip import/export + adapter test fixtures

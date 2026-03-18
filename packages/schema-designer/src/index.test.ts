@@ -4,10 +4,15 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+	addAttribute,
+	addEntity,
+	addRelationship,
 	SchemaDesignerValidationError,
 	createEmptySchemaDesignerDocument,
 	exportSchemaDesignerDocument,
 	importSchemaDesignerDocument,
+	moveEntity,
+	renameEntity,
 	toFatosTransactionEntries,
 	toSchemaDesignerDocumentFromFatosSnapshot,
 	version
@@ -130,5 +135,55 @@ describe('@fatos/schema-designer', () => {
 		expect(document.schema.entities.map((entity) => entity.name)).toEqual(['org', 'user']);
 		expect(document.entitiesData).toHaveLength(2);
 		expect(document.entitiesData[0]?.attributes).toBeDefined();
+	});
+
+	it('adds and edits entities through editor helpers', () => {
+		const initial = createEmptySchemaDesignerDocument('Designer');
+		const created = addEntity(initial, { name: 'Account' });
+
+		expect(created.entityId).toBe('entity-1');
+		expect(created.document.schema.entities[0]?.name).toBe('Account');
+
+		const moved = moveEntity(created.document, created.entityId, { x: 420, y: 220 });
+		expect(moved.schema.entities[0]?.position).toEqual({ x: 420, y: 220 });
+
+		const renamed = renameEntity(moved, created.entityId, 'Customer');
+		expect(renamed.schema.entities[0]?.name).toBe('Customer');
+
+		const withAttribute = addAttribute(renamed, {
+			entityId: created.entityId,
+			name: 'email',
+			valueType: 'string',
+			cardinality: 'one'
+		});
+		expect(withAttribute.schema.entities[0]?.attributes).toHaveLength(1);
+		expect(withAttribute.schema.entities[0]?.attributes[0]?.name).toBe('email');
+	});
+
+	it('creates relationships only for valid entity references', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one',
+			referenceAttributeName: 'orgId'
+		});
+
+		expect(linked.schema.relationships).toHaveLength(1);
+		expect(linked.schema.relationships[0]?.name).toBe('member_of');
+
+		const ignoredInvalid = addRelationship(linked, {
+			name: 'broken',
+			fromEntityId: first.entityId,
+			toEntityId: 'missing',
+			fromCardinality: 'one',
+			toCardinality: 'many'
+		});
+
+		expect(ignoredInvalid.schema.relationships).toHaveLength(1);
 	});
 });

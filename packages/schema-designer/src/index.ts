@@ -152,9 +152,10 @@ function validateDocumentShape(doc: unknown): string[] {
 	if (!Array.isArray(schema.entities)) {
 		issues.push('schema.entities must be an array');
 	} else {
+		const entities = schema.entities as unknown[];
 		const entityIds = new Set<string>();
-		for (let i = 0; i < schema.entities.length; i += 1) {
-			const entity = schema.entities[i];
+		for (let i = 0; i < entities.length; i += 1) {
+			const entity = entities[i];
 			if (!isObject(entity)) {
 				issues.push(`schema.entities[${i}] must be an object`);
 				continue;
@@ -181,9 +182,10 @@ function validateDocumentShape(doc: unknown): string[] {
 				continue;
 			}
 
+			const attributes = entity.attributes as unknown[];
 			const attributeIds = new Set<string>();
-			for (let j = 0; j < entity.attributes.length; j += 1) {
-				const attribute = entity.attributes[j];
+			for (let j = 0; j < attributes.length; j += 1) {
+				const attribute = attributes[j];
 				if (!isObject(attribute)) {
 					issues.push(`schema.entities[${i}].attributes[${j}] must be an object`);
 					continue;
@@ -247,8 +249,8 @@ export function createEmptySchemaDesignerDocument(name = 'Untitled Schema'): Sch
 	};
 }
 
-export function importSchemaDesignerDocument(input: string | unknown): SchemaDesignerDocument {
-	const parsed = typeof input === 'string' ? JSON.parse(input) : input;
+export function importSchemaDesignerDocument(input: unknown): SchemaDesignerDocument {
+	const parsed: unknown = typeof input === 'string' ? (JSON.parse(input) as unknown) : input;
 	const issues = validateDocumentShape(parsed);
 	if (issues.length > 0) {
 		throw new SchemaDesignerValidationError(issues);
@@ -413,4 +415,15 @@ export function toFatosTransactionEntries(document: SchemaDesignerDocument): Tra
 
 	return entries;
 }
+
+export {
+	addAttribute,
+	addEntity,
+	addRelationship,
+	moveEntity,
+	renameEntity,
+	type AddAttributeOptions,
+	type AddEntityOptions,
+	type AddRelationshipOptions
+} from './editor';
 
