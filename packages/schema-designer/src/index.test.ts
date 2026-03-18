@@ -15,6 +15,8 @@ import {
 	renameEntity,
 	toFatosTransactionEntries,
 	toSchemaDesignerDocumentFromFatosSnapshot,
+	updateAttribute,
+	updateRelationshipName,
 	version
 } from './index';
 
@@ -185,5 +187,52 @@ describe('@fatos/schema-designer', () => {
 		});
 
 		expect(ignoredInvalid.schema.relationships).toHaveLength(1);
+	});
+
+	it('updates an existing attribute name and metadata', () => {
+		const created = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const withAttribute = addAttribute(created.document, {
+			entityId: created.entityId,
+			name: 'email',
+			valueType: 'string',
+			cardinality: 'one'
+		});
+
+		const attributeId = withAttribute.schema.entities[0]?.attributes[0]?.id;
+		expect(attributeId).toBeDefined();
+
+		const updated = updateAttribute(withAttribute, {
+			entityId: created.entityId,
+			attributeId: attributeId as string,
+			name: 'age',
+			valueType: 'number',
+			cardinality: 'many'
+		});
+
+		expect(updated.schema.entities[0]?.attributes[0]).toEqual(
+			expect.objectContaining({
+				name: 'age',
+				valueType: 'number',
+				cardinality: 'many'
+			})
+		);
+	});
+
+	it('updates existing relationship name', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one'
+		});
+
+		const relationshipId = linked.schema.relationships[0]?.id;
+		expect(relationshipId).toBeDefined();
+
+		const updated = updateRelationshipName(linked, relationshipId as string, 'belongs_to_org');
+		expect(updated.schema.relationships[0]?.name).toBe('belongs_to_org');
 	});
 });

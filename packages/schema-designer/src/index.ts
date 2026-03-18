@@ -422,8 +422,11 @@ export {
 	addRelationship,
 	moveEntity,
 	renameEntity,
+	updateAttribute,
+	updateRelationshipName,
 	type AddAttributeOptions,
 	type AddEntityOptions,
-	type AddRelationshipOptions
+	type AddRelationshipOptions,
+	type UpdateAttributeOptions
 } from './editor';
 

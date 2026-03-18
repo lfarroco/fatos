@@ -4,14 +4,17 @@ import {
 	exportSchemaDesignerDocument,
 	importSchemaDesignerDocument,
 	type Cardinality,
-	type SchemaDesignerDocument
+	type SchemaDesignerDocument,
+	type ValueType
 } from './index';
 import {
 	addAttribute,
 	addEntity,
 	addRelationship,
 	moveEntity,
-	renameEntity
+	renameEntity,
+	updateAttribute,
+	updateRelationshipName
 } from './editor';
 
 export type SchemaDesignerWorkspaceProps = {
@@ -219,30 +222,34 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 	}, [document, selectedEntity, updateDocument]);
 
 	const onFromEntityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+		const value = event.currentTarget.value;
 		setConnectDraft((current) => ({
 			...current,
-			fromEntityId: event.currentTarget.value
+			fromEntityId: value
 		}));
 	}, []);
 
 	const onToEntityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+		const value = event.currentTarget.value;
 		setConnectDraft((current) => ({
 			...current,
-			toEntityId: event.currentTarget.value
+			toEntityId: value
 		}));
 	}, []);
 
 	const onFromCardinalityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+		const value = event.currentTarget.value as Cardinality;
 		setConnectDraft((current) => ({
 			...current,
-			fromCardinality: event.currentTarget.value as Cardinality
+			fromCardinality: value
 		}));
 	}, []);
 
 	const onToCardinalityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+		const value = event.currentTarget.value as Cardinality;
 		setConnectDraft((current) => ({
 			...current,
-			toCardinality: event.currentTarget.value as Cardinality
+			toCardinality: value
 		}));
 	}, []);
 
@@ -258,18 +265,70 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 	);
 
 	const onRelationshipNameChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+		const value = event.currentTarget.value;
 		setConnectDraft((current) => ({
 			...current,
-			name: event.currentTarget.value
+			name: value
 		}));
 	}, []);
 
 	const onReferenceAttributeChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+		const value = event.currentTarget.value;
 		setConnectDraft((current) => ({
 			...current,
-			referenceAttributeName: event.currentTarget.value
+			referenceAttributeName: value
 		}));
 	}, []);
+
+	const onAttributeNameChange = React.useCallback(
+		(entityId: string, attributeId: string) => (event: React.ChangeEvent<HTMLInputElement>) => {
+			const value = event.currentTarget.value;
+			updateDocument(
+				updateAttribute(document, {
+					entityId,
+					attributeId,
+					name: value
+				})
+			);
+		},
+		[document, updateDocument]
+	);
+
+	const onAttributeValueTypeChange = React.useCallback(
+		(entityId: string, attributeId: string) => (event: React.ChangeEvent<HTMLSelectElement>) => {
+			const value = event.currentTarget.value as ValueType;
+			updateDocument(
+				updateAttribute(document, {
+					entityId,
+					attributeId,
+					valueType: value
+				})
+			);
+		},
+		[document, updateDocument]
+	);
+
+	const onAttributeCardinalityChange = React.useCallback(
+		(entityId: string, attributeId: string) => (event: React.ChangeEvent<HTMLSelectElement>) => {
+			const value = event.currentTarget.value as Cardinality;
+			updateDocument(
+				updateAttribute(document, {
+					entityId,
+					attributeId,
+					cardinality: value
+				})
+			);
+		},
+		[document, updateDocument]
+	);
+
+	const onExistingRelationshipNameChange = React.useCallback(
+		(relationshipId: string) => (event: React.ChangeEvent<HTMLInputElement>) => {
+			const value = event.currentTarget.value;
+			updateDocument(updateRelationshipName(document, relationshipId, value));
+		},
+		[document, updateDocument]
+	);
 
 	return React.createElement(
 		'div',
@@ -309,7 +368,59 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 						value: selectedEntity.name,
 						onChange: onSelectedEntityNameChange(selectedEntity.id)
 					}),
-					React.createElement('button', { type: 'button', style: buttonStyle, onClick: onAddAttribute }, 'Add Attribute')
+					React.createElement('button', { type: 'button', style: buttonStyle, onClick: onAddAttribute }, 'Add Attribute'),
+					React.createElement(
+						'div',
+						{ style: { display: 'grid', gap: '8px' } },
+						selectedEntity.attributes.map((attribute) =>
+							React.createElement(
+								'div',
+								{
+									key: attribute.id,
+									style: {
+										padding: '8px',
+										border: '1px solid #cbd5e1',
+										borderRadius: '8px',
+										background: '#f8fafc',
+										display: 'grid',
+										gap: '6px'
+									}
+								},
+								React.createElement('input', {
+									style: inputStyle,
+									value: attribute.name,
+									onChange: onAttributeNameChange(selectedEntity.id, attribute.id)
+								}),
+								React.createElement(
+									'div',
+									{ style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' } },
+									React.createElement(
+										'select',
+										{
+											style: inputStyle,
+											value: attribute.valueType,
+											onChange: onAttributeValueTypeChange(selectedEntity.id, attribute.id)
+										},
+										React.createElement('option', { value: 'string' }, 'string'),
+										React.createElement('option', { value: 'number' }, 'number'),
+										React.createElement('option', { value: 'boolean' }, 'boolean'),
+										React.createElement('option', { value: 'null' }, 'null'),
+										React.createElement('option', { value: 'unknown' }, 'unknown')
+									),
+									React.createElement(
+										'select',
+										{
+											style: inputStyle,
+											value: attribute.cardinality,
+											onChange: onAttributeCardinalityChange(selectedEntity.id, attribute.id)
+										},
+										React.createElement('option', { value: 'one' }, 'one'),
+										React.createElement('option', { value: 'many' }, 'many')
+									)
+								)
+							)
+						)
+					)
 				)
 				: null
 		),
@@ -458,6 +569,36 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 				onChange: onReferenceAttributeChange
 			}),
 			React.createElement('button', { type: 'button', style: buttonStyle, onClick: onCreateRelationship }, 'Connect'),
+			React.createElement(
+				'div',
+				{ style: { display: 'grid', gap: '8px' } },
+				document.schema.relationships.map((relationship) =>
+					React.createElement(
+						'div',
+						{
+							key: relationship.id,
+							style: {
+								padding: '8px',
+								border: '1px solid #cbd5e1',
+								borderRadius: '8px',
+								background: '#f8fafc',
+								display: 'grid',
+								gap: '6px'
+							}
+						},
+						React.createElement('input', {
+							style: inputStyle,
+							value: relationship.name,
+							onChange: onExistingRelationshipNameChange(relationship.id)
+						}),
+						React.createElement(
+							'div',
+							{ style: { fontSize: '11px', color: '#334155' } },
+							`${relationship.fromCardinality} ${relationship.fromEntityId} -> ${relationship.toCardinality} ${relationship.toEntityId}`
+						)
+					)
+				)
+			),
 			React.createElement('hr', { style: { width: '100%', border: 0, borderTop: '1px solid #cbd5e1' } }),
 			React.createElement('h4', { style: { margin: 0, fontSize: '13px' } }, 'Import / Export JSON'),
 			React.createElement('button', {

@@ -28,6 +28,14 @@ export type AddAttributeOptions = {
 	cardinality: Cardinality;
 };
 
+export type UpdateAttributeOptions = {
+	entityId: string;
+	attributeId: string;
+	name?: string;
+	valueType?: ValueType;
+	cardinality?: Cardinality;
+};
+
 function slugify(value: string): string {
 	const normalized = value
 		.trim()
@@ -194,6 +202,40 @@ export function addAttribute(
 	};
 }
 
+export function updateAttribute(
+	document: SchemaDesignerDocument,
+	options: UpdateAttributeOptions
+): SchemaDesignerDocument {
+	return {
+		...document,
+		schema: {
+			...document.schema,
+			entities: document.schema.entities.map((entity) => {
+				if (entity.id !== options.entityId) {
+					return entity;
+				}
+
+				return {
+					...entity,
+					attributes: entity.attributes.map((attribute) => {
+						if (attribute.id !== options.attributeId) {
+							return attribute;
+						}
+
+						const nextName = options.name ?? attribute.name;
+						return {
+							...attribute,
+							name: nextName,
+							valueType: options.valueType ?? attribute.valueType,
+							cardinality: options.cardinality ?? attribute.cardinality
+						};
+					})
+				};
+			})
+		}
+	};
+}
+
 export function addRelationship(
 	document: SchemaDesignerDocument,
 	options: AddRelationshipOptions
@@ -221,6 +263,29 @@ export function addRelationship(
 		schema: {
 			...document.schema,
 			relationships: [...document.schema.relationships, relationship]
+		}
+	};
+}
+
+export function updateRelationshipName(
+	document: SchemaDesignerDocument,
+	relationshipId: string,
+	name: string
+): SchemaDesignerDocument {
+	return {
+		...document,
+		schema: {
+			...document.schema,
+			relationships: document.schema.relationships.map((relationship) => {
+				if (relationship.id !== relationshipId) {
+					return relationship;
+				}
+
+				return {
+					...relationship,
+					name
+				};
+			})
 		}
 	};
 }
