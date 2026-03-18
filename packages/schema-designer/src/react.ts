@@ -154,6 +154,42 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 
 	const selectedEntity = selectedEntityId ? entityById.get(selectedEntityId) ?? null : null;
 
+		const relationshipLayouts = React.useMemo(() => {
+			return document.schema.relationships.map((relationship, index) => {
+				const fromEntity = entityById.get(relationship.fromEntityId);
+				const toEntity = entityById.get(relationship.toEntityId);
+
+				if (!fromEntity || !toEntity) {
+					return {
+						relationship,
+						startX: 24,
+						startY: 24 + index * 22,
+						endX: 200,
+						endY: 24 + index * 22,
+						labelX: 28,
+						labelY: 8 + index * 22
+					};
+				}
+
+				const startX = fromEntity.position.x + 230;
+				const startY = fromEntity.position.y + 30;
+				const endX = toEntity.position.x;
+				const endY = toEntity.position.y + 30;
+				const labelX = (startX + endX) / 2 - 70;
+				const labelY = (startY + endY) / 2 - 16 + (index % 3) * 12;
+
+				return {
+					relationship,
+					startX,
+					startY,
+					endX,
+					endY,
+					labelX,
+					labelY
+				};
+			});
+		}, [document.schema.relationships, entityById]);
+
 	const onCanvasMouseMove = React.useCallback(
 		(event: React.MouseEvent<HTMLDivElement>) => {
 			if (!dragState || !canvasRef.current) {
@@ -436,24 +472,63 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 			React.createElement(
 				'div',
 				{ style: canvasInnerStyle },
-				document.schema.relationships.map((relationship) =>
+				React.createElement(
+					'svg',
+					{
+						style: {
+							position: 'absolute',
+							inset: 0,
+							width: '100%',
+							height: '100%',
+							pointerEvents: 'none'
+						}
+					},
+					relationshipLayouts.map((layout) =>
+						React.createElement(
+							'g',
+							{ key: `line-${layout.relationship.id}` },
+							React.createElement('line', {
+								x1: layout.startX,
+								y1: layout.startY,
+								x2: layout.endX,
+								y2: layout.endY,
+								stroke: '#0f766e',
+								strokeWidth: 2,
+								strokeDasharray: '4 4'
+							}),
+							React.createElement('circle', {
+								cx: layout.startX,
+								cy: layout.startY,
+								r: 3,
+								fill: '#0f766e'
+							}),
+							React.createElement('circle', {
+								cx: layout.endX,
+								cy: layout.endY,
+								r: 3,
+								fill: '#0f766e'
+							})
+						)
+					)
+				),
+				relationshipLayouts.map((layout) =>
 					React.createElement(
 						'div',
 						{
-							key: relationship.id,
+							key: layout.relationship.id,
 							style: {
 								position: 'absolute',
-								top: '6px',
-								left: '10px',
+								top: `${layout.labelY}px`,
+								left: `${layout.labelX}px`,
 								fontSize: '11px',
 								padding: '2px 6px',
 								borderRadius: '999px',
 								border: '1px solid #155e75',
 								background: '#cffafe',
-								marginBottom: '4px'
+								boxShadow: '0 1px 2px rgba(15, 23, 42, 0.2)'
 							}
 						},
-						`${relationship.name}: ${relationship.fromCardinality} -> ${relationship.toCardinality}`
+						`${layout.relationship.name}: ${layout.relationship.fromCardinality} -> ${layout.relationship.toCardinality}`
 					)
 				),
 				document.schema.entities.map((entity) =>
