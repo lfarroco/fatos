@@ -23,6 +23,7 @@ Fatos stores application state as immutable facts rather than mutable objects. T
 - **`@fatos/devtools`** - Browser DevTools extension
 - **`@fatos/persistence`** - Storage adapters (PostgreSQL, MongoDB, etc.)
 - **`@fatos/chrome-extension`** - Chrome DevTools integration
+- **`@fatos/schema-designer`** - Visual schema designer with import/export adapters
 - **`@fatos/examples`** - Example applications
 
 ## Quick Start
