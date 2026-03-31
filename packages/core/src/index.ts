@@ -12,9 +12,10 @@
 export const version = '0.0.1';
 
 export type FactOperation = 'add' | 'retract';
+export type EntityId = number | string;
 
 export type Fact = readonly [
-	eid: number,
+	eid: EntityId,
 	attribute: string,
 	value: unknown,
 	tx: number,
@@ -29,7 +30,13 @@ export type TransactionRecord = readonly [
 
 export type Mutation = readonly [
 	op: FactOperation,
-	eid: number,
+	eid: EntityId,
+	attribute: string,
+	value: unknown
+];
+
+export type FactTuple = readonly [
+	eid: EntityId,
 	attribute: string,
 	value: unknown
 ];
@@ -44,6 +51,7 @@ export type SchemaDeclaration = {
 };
 
 export type TransactionEntry = Mutation | SchemaDeclaration;
+export type TransactionEntryInput = TransactionEntry | FactTuple;
 
 type AttributeSchema = {
 	eid: number;
@@ -66,10 +74,10 @@ export type QuerySpec = {
 	where: QueryClause[];
 };
 
-type EntityState = Record<string, unknown> & { id: number };
+type EntityState = Record<string, unknown> & { id: EntityId };
 
-type EAVTIndex = Map<number, Map<string, Fact[]>>;
-type AEVTIndex = Map<string, Map<number, Fact[]>>;
+type EAVTIndex = Map<EntityId, Map<string, Fact[]>>;
+type AEVTIndex = Map<string, Map<EntityId, Fact[]>>;
 type AVETIndex = Map<string, Map<string, Fact[]>>;
 
 function normalizeTxLimit(tx?: number): number {
@@ -93,8 +101,16 @@ function isVariable(term: QueryTerm): term is string {
 	return typeof term === 'string' && term.startsWith('?');
 }
 
-function isSchemaDeclaration(entry: TransactionEntry): entry is SchemaDeclaration {
+function isSchemaDeclaration(entry: TransactionEntryInput): entry is SchemaDeclaration {
 	return !Array.isArray(entry);
+}
+
+function isMutation(entry: TransactionEntryInput): entry is Mutation {
+	return Array.isArray(entry) && entry.length === 4 && (entry[0] === 'add' || entry[0] === 'retract');
+}
+
+function isFactTuple(entry: TransactionEntryInput): entry is FactTuple {
+	return Array.isArray(entry) && entry.length === 3;
 }
 
 function matchesValueType(value: unknown, valueType: ValueType): boolean {
@@ -128,7 +144,7 @@ export class FactDatabase {
 		return transaction;
 	}
 
-	private appendFact(tx: number, op: FactOperation, eid: number, attribute: string, value: unknown): Fact {
+	private appendFact(tx: number, op: FactOperation, eid: EntityId, attribute: string, value: unknown): Fact {
 		const fact: Fact = [eid, attribute, value, tx, op];
 		this.facts.push(fact);
 
@@ -138,7 +154,7 @@ export class FactDatabase {
 		entityAttributes.set(attribute, eavtFacts);
 		this.eavt.set(eid, entityAttributes);
 
-		const attributeEntities = this.aevt.get(attribute) ?? new Map<number, Fact[]>();
+		const attributeEntities = this.aevt.get(attribute) ?? new Map<EntityId, Fact[]>();
 		const aevtFacts = attributeEntities.get(eid) ?? [];
 		aevtFacts.push(fact);
 		attributeEntities.set(eid, aevtFacts);
@@ -154,17 +170,27 @@ export class FactDatabase {
 		return fact;
 	}
 
-	add(eid: number, attribute: string, value: unknown): Fact {
-		const facts = this.transact([['add', eid, attribute, value]]);
+	add(eid: EntityId, attribute: string, value: unknown): Fact;
+	add(tuple: FactTuple): Fact;
+	add(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
+		const mutation = Array.isArray(eidOrTuple)
+			? ['add', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]] as const
+			: ['add', eidOrTuple, attribute as string, value] as const;
+		const facts = this.transact([mutation]);
 		return facts[0] as Fact;
 	}
 
-	retract(eid: number, attribute: string, value: unknown): Fact {
-		const facts = this.transact([['retract', eid, attribute, value]]);
+	retract(eid: EntityId, attribute: string, value: unknown): Fact;
+	retract(tuple: FactTuple): Fact;
+	retract(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
+		const mutation = Array.isArray(eidOrTuple)
+			? ['retract', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]] as const
+			: ['retract', eidOrTuple, attribute as string, value] as const;
+		const facts = this.transact([mutation]);
 		return facts[0] as Fact;
 	}
 
-	transact(entries: TransactionEntry[], metadata?: Record<string, unknown>): Fact[] {
+	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
 		if (entries.length === 0) {
 			return [];
 		}
@@ -176,7 +202,17 @@ export class FactDatabase {
 				continue;
 			}
 
-			mutations.push(entry);
+			if (isFactTuple(entry)) {
+				mutations.push(['add', entry[0], entry[1], entry[2]]);
+				continue;
+			}
+
+			if (isMutation(entry)) {
+				mutations.push(entry);
+				continue;
+			}
+
+			throw new Error('Invalid transaction entry format');
 		}
 
 		this.validateMutations(mutations);
@@ -193,7 +229,7 @@ export class FactDatabase {
 		return this.facts.slice();
 	}
 
-	getFactsByEntity(eid: number): readonly Fact[] {
+	getFactsByEntity(eid: EntityId): readonly Fact[] {
 		const entityAttributes = this.eavt.get(eid);
 		if (!entityAttributes) {
 			return [];
@@ -221,7 +257,7 @@ export class FactDatabase {
 		return facts.sort((left, right) => left[3] - right[3]);
 	}
 
-	getFactsByEntityAttribute(eid: number, attribute: string): readonly Fact[] {
+	getFactsByEntityAttribute(eid: EntityId, attribute: string): readonly Fact[] {
 		return this.eavt.get(eid)?.get(attribute)?.slice() ?? [];
 	}
 
@@ -258,7 +294,7 @@ export class FactDatabase {
 			.sort((left, right) => left.ident.localeCompare(right.ident));
 	}
 
-	entity(eid: number, tx?: number): EntityState | null {
+	entity(eid: EntityId, tx?: number): EntityState | null {
 		const txLimit = normalizeTxLimit(tx);
 		const state = new Map<string, unknown | Set<unknown>>();
 
@@ -312,7 +348,7 @@ export class FactDatabase {
 
 	find(criteria: Record<string, unknown>, tx?: number): EntityState[] {
 		const txLimit = normalizeTxLimit(tx);
-		const eids = new Set<number>();
+		const eids = new Set<EntityId>();
 
 		for (const [eid, , , factTx] of this.facts) {
 			if (factTx <= txLimit) {
@@ -408,9 +444,9 @@ export class FactDatabase {
 		return Object.is(binding[term], actualValue) ? binding : null;
 	}
 
-	private materializedTriples(tx?: number): Array<[number, string, QueryTerm]> {
+	private materializedTriples(tx?: number): Array<[EntityId, string, QueryTerm]> {
 		const txLimit = normalizeTxLimit(tx);
-		const eids = new Set<number>();
+		const eids = new Set<EntityId>();
 
 		for (const [eid, , , factTx] of this.facts) {
 			if (factTx <= txLimit) {
@@ -418,7 +454,7 @@ export class FactDatabase {
 			}
 		}
 
-		const triples: Array<[number, string, QueryTerm]> = [];
+		const triples: Array<[EntityId, string, QueryTerm]> = [];
 		for (const eid of eids) {
 			const entity = this.entity(eid, txLimit);
 			if (!entity) {
@@ -472,7 +508,7 @@ export class FactDatabase {
 			return;
 		}
 
-		if (attribute === 'db/ident' && typeof value === 'string') {
+		if (attribute === 'db/ident' && typeof value === 'string' && typeof eid === 'number') {
 			this.schemaByIdent.set(value, eid);
 			this.attributeSchemas.set(value, {
 				eid,
@@ -543,7 +579,7 @@ export class FactDatabase {
 		}
 	}
 
-	private activeValues(eid: number, attribute: string): unknown[] {
+	private activeValues(eid: EntityId, attribute: string): unknown[] {
 		const schema = this.attributeSchemas.get(attribute);
 		if (schema?.cardinality === 'many') {
 			const values = new Set<unknown>();

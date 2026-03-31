@@ -28,6 +28,14 @@ describe('@fatos/core', () => {
 		]);
 	});
 
+	it('supports ergonomic add tuple and string entity ids', () => {
+		const db = createDatabase();
+
+		const fact = db.add(['eid1', 'name', 'Alice']);
+		expect(fact).toEqual(['eid1', 'name', 'Alice', 1, 'add']);
+		expect(db.entity('eid1')).toEqual({ id: 'eid1', name: 'Alice' });
+	});
+
 	it('builds entity state from add/retract facts', () => {
 		const db = createDatabase();
 		db.add(1, 'name', 'Alice');
@@ -79,6 +87,21 @@ describe('@fatos/core', () => {
 			{ id: 10, type: 'user', name: 'Charlie' },
 			{ id: 11, type: 'user' }
 		]);
+	});
+
+	it('supports transact with ergonomic tuple list', () => {
+		const db = createDatabase();
+
+		const facts = db.transact([
+			['eid1', 'name', 'Alice'],
+			['eid1', 'role', 'admin']
+		]);
+
+		expect(facts).toEqual([
+			['eid1', 'name', 'Alice', 1, 'add'],
+			['eid1', 'role', 'admin', 1, 'add']
+		]);
+		expect(db.entity('eid1')).toEqual({ id: 'eid1', name: 'Alice', role: 'admin' });
 	});
 
 	it('provides indexed fact lookups through EAVT, AEVT, and AVET', () => {

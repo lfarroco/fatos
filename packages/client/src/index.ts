@@ -11,19 +11,22 @@
 
 import {
 	createDatabase,
+	type EntityId,
 	type Fact,
+	type FactTuple,
 	type FactDatabase,
 	type Mutation,
 	type QuerySpec,
 	type QueryTerm,
 	type SchemaInfo,
+	type TransactionEntryInput,
 	type TransactionEntry,
 	type TransactionRecord
 } from '../../core/src/index';
 
 export const version = '0.0.1';
 
-export type EntityState = Record<string, unknown> & { id: number };
+export type EntityState = Record<string, unknown> & { id: EntityId };
 export type Unsubscribe = () => void;
 
 type Listener = () => void;
@@ -53,19 +56,35 @@ export class FatosClient {
 		}
 	}
 
-	add(eid: number, attribute: string, value: unknown): Fact {
-		const fact = this.db.add(eid, attribute, value);
+	add(eid: EntityId, attribute: string, value: unknown): Fact;
+	add(tuple: FactTuple): Fact;
+	add(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
+		let fact: Fact;
+		if (Array.isArray(eidOrTuple)) {
+			const tuple = eidOrTuple as FactTuple;
+			fact = this.db.add(tuple);
+		} else {
+			fact = this.db.add(eidOrTuple as EntityId, attribute as string, value);
+		}
 		this.notify();
 		return fact;
 	}
 
-	retract(eid: number, attribute: string, value: unknown): Fact {
-		const fact = this.db.retract(eid, attribute, value);
+	retract(eid: EntityId, attribute: string, value: unknown): Fact;
+	retract(tuple: FactTuple): Fact;
+	retract(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
+		let fact: Fact;
+		if (Array.isArray(eidOrTuple)) {
+			const tuple = eidOrTuple as FactTuple;
+			fact = this.db.retract(tuple);
+		} else {
+			fact = this.db.retract(eidOrTuple as EntityId, attribute as string, value);
+		}
 		this.notify();
 		return fact;
 	}
 
-	transact(entries: TransactionEntry[], metadata?: Record<string, unknown>): Fact[] {
+	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
 		const facts = this.db.transact(entries, metadata);
 		if (facts.length > 0) {
 			this.notify();
@@ -77,7 +96,7 @@ export class FatosClient {
 		return this.db.getFacts();
 	}
 
-	getFactsByEntity(eid: number): readonly Fact[] {
+	getFactsByEntity(eid: EntityId): readonly Fact[] {
 		return this.db.getFactsByEntity(eid);
 	}
 
@@ -85,7 +104,7 @@ export class FatosClient {
 		return this.db.getFactsByAttribute(attribute);
 	}
 
-	getFactsByEntityAttribute(eid: number, attribute: string): readonly Fact[] {
+	getFactsByEntityAttribute(eid: EntityId, attribute: string): readonly Fact[] {
 		return this.db.getFactsByEntityAttribute(eid, attribute);
 	}
 
@@ -105,7 +124,7 @@ export class FatosClient {
 		return this.db.getSchemas();
 	}
 
-	entity(eid: number, tx?: number): EntityState | null {
+	entity(eid: EntityId, tx?: number): EntityState | null {
 		return this.db.entity(eid, tx) as EntityState | null;
 	}
 
@@ -119,7 +138,7 @@ export class FatosClient {
 
 	atTransaction(tx: number) {
 		return {
-			entity: (eid: number) => this.entity(eid, tx),
+			entity: (eid: EntityId) => this.entity(eid, tx),
 			find: (criteria: Record<string, unknown>) => this.find(criteria, tx),
 			query: (spec: QuerySpec) => this.query(spec, tx)
 		};
@@ -157,7 +176,7 @@ export class FatosClient {
 		});
 	}
 
-	observeEntity(eid: number, callback: (entity: EntityState | null) => void): Unsubscribe {
+	observeEntity(eid: EntityId, callback: (entity: EntityState | null) => void): Unsubscribe {
 		let previous = stableKey(this.entity(eid));
 		callback(this.entity(eid));
 
@@ -195,12 +214,15 @@ export function createClient(db?: FactDatabase): FatosClient {
 }
 
 export type {
+	EntityId,
 	Fact,
+	FactTuple,
 	FactDatabase,
 	Mutation,
 	QuerySpec,
 	QueryTerm,
 	SchemaInfo,
+	TransactionEntryInput,
 	TransactionEntry,
 	TransactionRecord
 };

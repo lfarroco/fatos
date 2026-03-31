@@ -19,6 +19,7 @@ import {
 } from 'react';
 import {
 	createClient,
+	type EntityId,
 	type EntityState,
 	type FatosClient,
 	type QuerySpec,
@@ -63,7 +64,7 @@ export function useDatalogQuery(spec: QuerySpec): QueryTerm[][] {
 	return useSyncExternalStore(client.subscribe.bind(client), getSnapshot, getSnapshot);
 }
 
-export function useEntity(eid: number): EntityState | null {
+export function useEntity(eid: EntityId): EntityState | null {
 	const client = useFatosClient();
 	const getSnapshot = useCallback(() => client.entity(eid), [client, eid]);
 
@@ -78,4 +79,4 @@ export function useTransaction(): readonly TransactionRecord[] {
 }
 
 export { createClient };
-export type { EntityState, FatosClient, QuerySpec, QueryTerm, TransactionRecord };
+export type { EntityId, EntityState, FatosClient, QuerySpec, QueryTerm, TransactionRecord };

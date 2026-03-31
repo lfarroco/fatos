@@ -32,14 +32,33 @@ client.add(2, 'user/name', 'Bob');
 client.retract(2, 'user/name', 'Bob');
 ```
 
+Ergonomic tuple input is also supported:
+
+```ts
+client.add(['eid1', 'name', 'Alice']);
+client.add(['eid1', 'name', 'Alicia']);
+```
+
+When no schema cardinality is declared, the latest add becomes the current value in `entity()` results.
+
 ## Transactional writes
 
 Use `transact` to apply multiple entries atomically.
 
 ```ts
 client.transact([
-  { op: 'add', eid: 1, attribute: 'user/role', value: 'admin' },
-  { op: 'add', eid: 2, attribute: 'user/role', value: 'viewer' }
+  ['add', 1, 'user/role', 'admin'],
+  ['add', 2, 'user/role', 'viewer']
+]);
+```
+
+You can also use ergonomic tuple lists (treated as add operations):
+
+```ts
+client.transact([
+  ['eid1', 'name', 'Alice'],
+  ['eid1', 'name', 'Alicia'],
+  ['eid2', 'name', 'Bob']
 ]);
 ```
 
@@ -47,7 +66,7 @@ You can also pass optional metadata:
 
 ```ts
 client.transact(
-  [{ op: 'add', eid: 1, attribute: 'user/active', value: true }],
+  [['add', 1, 'user/active', true]],
   { source: 'seed-script' }
 );
 ```

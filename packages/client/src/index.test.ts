@@ -31,6 +31,20 @@ describe('@fatos/client', () => {
 		).toEqual([[1], [2]]);
 	});
 
+	it('supports ergonomic tuple add and tuple transact', () => {
+		const client = createClient();
+
+		client.add(['eid1', 'name', 'Alice']);
+		client.add(['eid1', 'name', 'Alicia']);
+		client.transact([
+			['eid1', 'type', 'user'],
+			['eid2', 'name', 'Bob']
+		]);
+
+		expect(client.entity('eid1')).toEqual({ id: 'eid1', name: 'Alicia', type: 'user' });
+		expect(client.entity('eid2')).toEqual({ id: 'eid2', name: 'Bob' });
+	});
+
 	it('observes query criteria changes reactively', () => {
 		const client = createClient();
 		const snapshots: Array<Array<{ id: number; type: string }>> = [];

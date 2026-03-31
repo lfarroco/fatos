@@ -132,8 +132,8 @@ export function AddUserButton() {
   const addUser = () => {
     const id = Date.now();
     client.transact([
-      { op: 'add', eid: id, attribute: 'user/name', value: 'New User' },
-      { op: 'add', eid: id, attribute: 'user/active', value: true }
+      ['add', id, 'user/name', 'New User'],
+      ['add', id, 'user/active', true]
     ]);
   };
 
