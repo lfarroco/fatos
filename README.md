@@ -96,7 +96,10 @@ npm run types
 
 ## Documentation
 
-See [PLAN.md](./PLAN.md) for detailed project plan and design decisions.
+- [docs/README.md](./docs/README.md) - Package usage guides
+- [docs/client-guide.md](./docs/client-guide.md) - How to use `@fatos/client`
+- [docs/react-guide.md](./docs/react-guide.md) - How to use `@fatos/react`
+- [PLAN.md](./PLAN.md) - Detailed project plan and design decisions
 
 ## Contributing
 
