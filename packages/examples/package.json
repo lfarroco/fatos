@@ -1,30 +1,49 @@
 {
 	"name": "@fatos/examples",
 	"version": "0.0.1",
-	"description": "Example applications using Fatos",
+	"description": "Example applications showcasing Fatos",
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"build": "tsup src/index.ts --format esm --dts --sourcemap",
-		"dev": "echo 'Examples are ready to run'",
+		"build": "tsup src/cli.ts --format esm --dts --sourcemap",
+		"dev": "tsup src/cli.ts --format esm --dts --sourcemap --watch",
+		"start": "node dist/cli.js",
+		"example": "vite-node src/cli.ts",
+		"example:basic": "vite-node src/cli.ts basic",
+		"example:schema": "vite-node src/cli.ts schema",
+		"example:query": "vite-node src/cli.ts query",
+		"example:time-travel": "vite-node src/cli.ts time-travel",
+		"example:reactive": "vite-node src/cli.ts reactive",
+		"example:server": "vite-node src/cli.ts server",
+		"example:react": "vite-node src/cli.ts react",
+		"example:schema-designer": "vite-node src/cli.ts schema-designer",
+		"example:full-stack": "vite-node src/cli.ts full-stack",
 		"test": "vitest"
 	},
 	"keywords": [
 		"examples",
-		"tutorial"
+		"tutorial",
+		"showcase"
 	],
 	"author": "",
 	"license": "MIT",
 	"dependencies": {
-		"@fatos/core": "file:../core",
 		"@fatos/client": "file:../client",
+		"@fatos/core": "file:../core",
+		"@fatos/react": "file:../react",
+		"@fatos/schema-designer": "file:../schema-designer",
 		"@fatos/server": "file:../server",
-		"@fatos/react": "file:../react"
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0",
+		"ws": "^8.19.0"
 	},
 	"devDependencies": {
 		"@types/node": "^20.10.0",
-		"typescript": "^5.3.3",
+		"@types/react": "^18.2.0",
+		"@types/react-dom": "^18.2.0",
+		"@types/ws": "^8.5.0",
 		"tsup": "^8.0.0",
+		"typescript": "^5.3.3",
 		"vitest": "^1.0.0"
 	}
 }

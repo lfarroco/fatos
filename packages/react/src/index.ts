@@ -25,7 +25,7 @@ import {
 	type QuerySpec,
 	type QueryTerm,
 	type TransactionRecord
-} from '../../client/src/index';
+} from '@fatos/client';
 
 export const version = '0.0.1';
 

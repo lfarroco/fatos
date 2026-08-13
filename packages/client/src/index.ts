@@ -22,7 +22,7 @@ import {
 	type TransactionEntryInput,
 	type TransactionEntry,
 	type TransactionRecord
-} from '../../core/src/index';
+} from '@fatos/core';
 
 export const version = '0.0.1';
 
