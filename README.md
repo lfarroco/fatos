@@ -2,7 +2,7 @@
 
 A full-stack, TypeScript-based temporal fact database system for building time-aware, immutable applications.
 
-**Status**: Early development (Phase 1)
+**Status**: All planned development phases (1–7) implemented.
 
 ## Overview
 
@@ -88,11 +88,12 @@ npm run types
 ## Development Phases
 
 - **Phase 1** ✓ Core database engine, fact storage, transactions, indexing
-- **Phase 2** React integration, client-side implementation
-- **Phase 3** Server implementation, multi-client sync
-- **Phase 4** DevTools browser extension
-- **Phase 5** Persistence layer and adapters
-- **Phase 6** Advanced features (time-travel UI, graph visualization)
+- **Phase 2** ✓ React integration, client-side implementation
+- **Phase 3** ✓ Server implementation, multi-client sync
+- **Phase 4** ✓ DevTools browser extension + inspector (fact table, query console, timeline, diff)
+- **Phase 5** ✓ Persistence layer and adapters (file, PostgreSQL, MongoDB, IndexedDB)
+- **Phase 6** ✓ Advanced features (time-travel UI, graph visualization, export/import, sync strategies)
+- **Phase 7** ✓ Schema Designer (relationship editing, import/export, round-trip fixtures)
 
 ## Documentation
 
