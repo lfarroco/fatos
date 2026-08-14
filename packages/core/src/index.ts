@@ -251,6 +251,169 @@ export function isLookupRef(value: unknown): value is LookupRef {
 }
 
 /**
+ * P3 wire protocol (design/03): JSON type tags for values that plain JSON
+ * cannot represent losslessly. Facts keep their 5-tuple shape on the wire;
+ * only the value slot is tagged.
+ *
+ * | JS                          | JSON                                      |
+ * |-----------------------------|-------------------------------------------|
+ * | `ref(id)`                   | `{ "$ref": id }`                          |
+ * | `ref(lookupRef([a, v]))`    | `{ "$ref": { "$lookupRef": [a, v] } }`    |
+ * | `lookupRef([a, v])`         | `{ "$lookupRef": [a, v] }`                |
+ * | `Date`                      | `{ "$date": ms }`                         |
+ * | `BigInt`                    | `{ "$bigint": "..." }`                    |
+ * | everything else             | plain JSON                                |
+ */
+export type WireTaggedValue =
+	| { readonly $ref: EntityId | { readonly $lookupRef: readonly [string, ScalarValue] } }
+	| { readonly $lookupRef: readonly [string, ScalarValue] }
+	| { readonly $date: number }
+	| { readonly $bigint: string };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Serializes a stored value into its JSON-wire form (design/03). */
+export function serializeValue(value: unknown): unknown {
+	if (isRef(value)) {
+		const target = value[REF_BRAND];
+		if (isTemp(target)) {
+			throw new Error('temp() handles cannot be serialized; resolve them before commit');
+		}
+
+		return { $ref: serializeValue(target) };
+	}
+
+	if (isLookupRef(value)) {
+		const [attribute, scalar] = value[LOOKUP_REF_BRAND];
+		return { $lookupRef: [attribute, scalar] };
+	}
+
+	if (value instanceof Date) {
+		return { $date: value.getTime() };
+	}
+
+	if (typeof value === 'bigint') {
+		return { $bigint: value.toString() };
+	}
+
+	if (Array.isArray(value)) {
+		return value.map((item) => serializeValue(item));
+	}
+
+	if (isTemp(value)) {
+		throw new Error('temp() handles cannot be serialized; resolve them before commit');
+	}
+
+	return value;
+}
+
+/** Inverse of {@link serializeValue}: parses a JSON-wire value back into engine values. */
+export function deserializeValue(json: unknown): unknown {
+	if (Array.isArray(json)) {
+		return json.map((item) => deserializeValue(item));
+	}
+
+	if (!isPlainRecord(json)) {
+		return json;
+	}
+
+	if (typeof json.$date === 'number' && Number.isFinite(json.$date)) {
+		return new Date(json.$date);
+	}
+
+	if (typeof json.$bigint === 'string') {
+		return BigInt(json.$bigint);
+	}
+
+	if ('$ref' in json) {
+		const target = json.$ref;
+		if (typeof target === 'number' || typeof target === 'string') {
+			return ref(target);
+		}
+
+		if (isPlainRecord(target) && Array.isArray(target.$lookupRef)) {
+			const pair = target.$lookupRef;
+			if (typeof pair[0] === 'string' && isScalarValue(pair[1])) {
+				return ref(lookupRef([pair[0], pair[1]]));
+			}
+		}
+
+		throw new Error('Invalid $ref wire value');
+	}
+
+	if ('$lookupRef' in json) {
+		const pair = json.$lookupRef;
+		if (Array.isArray(pair) && typeof pair[0] === 'string' && isScalarValue(pair[1])) {
+			return lookupRef([pair[0], pair[1]]);
+		}
+
+		throw new Error('Invalid $lookupRef wire value');
+	}
+
+	return json;
+}
+
+/**
+ * Deserializes a wire-form QuerySpec (design/03): `where` value terms may
+ * carry `$date`/`$bigint`/`$ref`/`$lookupRef` tags, and find-operator values
+ * (`$eq`, `$in`, ...) are deserialized recursively.
+ */
+export function deserializeQuerySpec(json: unknown): QuerySpec {
+	if (!isPlainRecord(json) || !Array.isArray(json.find) || !Array.isArray(json.where)) {
+		throw new Error('Invalid QuerySpec: expected { find: string[], where: QueryClause[] }');
+	}
+
+	const find = json.find.map((item) => {
+		if (typeof item !== 'string') {
+			throw new Error('Invalid QuerySpec: find entries must be strings');
+		}
+
+		return item;
+	});
+
+	const where: QueryClause[] = json.where.map((clause) => {
+		if (
+			!Array.isArray(clause) ||
+			clause.length < 3 ||
+			!isQueryTerm(clause[0]) ||
+			typeof clause[1] !== 'string'
+		) {
+			throw new Error('Invalid QuerySpec: where clauses must be [entity, attribute, value] triples');
+		}
+
+		return [clause[0], clause[1], deserializeQueryValue(clause[2])] as const;
+	});
+
+	return { find, where };
+}
+
+function deserializeQueryValue(json: unknown): QueryValueTerm {
+	if (isPlainRecord(json)) {
+		const keys = Object.keys(json);
+		const isTagged = keys.some(
+			(key) => key === '$ref' || key === '$lookupRef' || key === '$date' || key === '$bigint'
+		);
+		if (isTagged) {
+			return deserializeValue(json) as QueryValueTerm;
+		}
+
+		// Find-operator object: every key starts with '$'.
+		if (keys.length > 0 && keys.every((key) => key.startsWith('$'))) {
+			const operator: Record<string, unknown> = {};
+			for (const key of keys) {
+				operator[key] = deserializeValue(json[key]);
+			}
+
+			return operator as FindOperator;
+		}
+	}
+
+	return deserializeValue(json) as QueryValueTerm;
+}
+
+/**
  * Canonical identity key for a stored value. Used by the AVET index, entity
  * state dedup (cardinality-many), find matching, and unique-constraint
  * tracking. Date is keyed by ms epoch, BigInt by its string form, refs by

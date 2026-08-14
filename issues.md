@@ -328,3 +328,47 @@ back to sub-agents for fixes.
   `react-dom/client` + a DOM environment or @testing-library.
 - **Resolution**: devDeps added to packages/react only (`react-test-renderer@^18.3.1`,
   `@types/react-test-renderer@^18.3.1`); package-lock.json updated.
+
+## [2026-08-14] core+server — P3 wire protocol implemented (JSON tags, /query, WS subscribe)
+- **Task**: P3 wire & hygiene (docs/design/03-reactivity-and-wire.md "Wire protocol", docs/design/04-phasing.md P3)
+- **Found by**: P3 wire protocol implementation (packages/core, packages/server)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Landed JSON type tags + reviver in core (`serializeValue` /
+  `deserializeValue` / `deserializeQuerySpec`, exported; wire forms `$ref` /
+  `$lookupRef` / `$date` / `$bigint`), `POST /query` (`{ spec, tx? }` →
+  `{ rows }`), and the WebSocket `subscribe` registry (subscribe → `subscribed`
+  + `facts` pushes, unsubscribe, per-client registry, `afterTx` catch-up). The
+  raw `fact:added`/`transaction:committed` fan-out over WS is unchanged. Design
+  decisions and deviations recorded:
+  - **`afterTx` catch-up sends the current query-result snapshot (rows), not
+    fact-filtered-by-tx.** The catch-up message shape is `{ type: 'facts', id,
+    rows }` (joined datalog rows, not raw facts), so "stream committed facts
+    since that tx" is implemented as: send `live.current` rows at subscribe
+    time (covering everything committed up to now — i.e. everything the client
+    missed since `afterTx`) and then live updates. The client converges to
+    authoritative state; this matches the P3 acceptance test (catch-up after
+    re-subscribe).
+  - **Datalog rows can never contain tagged values today.** The query engine
+    binds only QueryTerms (string/number/boolean/null) — non-QueryTerm values
+    (Date/bigint/ref) are skipped when binding variables — so `POST /query`
+    `rows` and WS `facts` pushes are always plain JSON; `serializeValue` is
+    still applied for future-proofing. Tagged **constants in specs** do work:
+    `{ $date: ms }` etc. revive and match via the canonical value key.
+  - **`GET /facts/:eid` (entity snapshot) and the SSE `/events` stream are
+    unchanged** (per "keep the existing endpoints unchanged"): entity state
+    containing Date/ref values still stringifies via JSON.stringify's defaults
+    (ISO string / `{}`) there. Only the fact log (`GET /facts`, `/transact`
+    responses), query rows, and WS subscribe pushes are wire-tagged.
+  - **Invalid WS subscribe messages are silently ignored** — the design doc
+    defines no error message, so malformed JSON, missing/non-string `id`,
+    non-numeric `afterTx`, or an invalid spec get no reply.
+  - **Re-subscribing with an existing id disposes the previous live handle**
+    and replaces it (registry is keyed by client-chosen id per the doc's
+    "one subscription registry per client").
+- **Resolution**: wire helpers + tests in core (wire.test.ts, 23 tests);
+  server: `POST /query`, tagged-value handling on `/transact` + `/facts` +
+  `GET /facts`, WS subscribe registry with afterTx catch-up, tests in
+  index.test.ts (+4). Validation: core build/typecheck/tests green (202
+  tests), server build/typecheck/tests green (9 tests), client + examples
+  typecheck green.

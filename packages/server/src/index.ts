@@ -14,7 +14,11 @@ import { createServer, type IncomingMessage, type Server as NodeServer, type Ser
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
 	createDatabase,
+	deserializeQuerySpec,
+	deserializeValue,
+	serializeValue,
 	type Fact,
+	type LiveResult,
 	type Mutation,
 	type QuerySpec,
 	type QueryTerm,
@@ -107,12 +111,56 @@ function isObject(value: unknown): value is JsonObject {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * One client subscription in the WS subscribe registry (design/03): a
+ * server-side mirror of `db.live(spec)` semantics, keyed by the client-chosen
+ * subscription id.
+ */
+type ClientSubscription = {
+	id: string;
+	live: LiveResult<QueryTerm[][]>;
+};
+
+/** Serializes a fact for the wire: the 5-tuple shape is kept, values tagged (design/03). */
+function serializeFact(fact: Fact): unknown {
+	return [fact[0], fact[1], serializeValue(fact[2]), fact[3], fact[4]];
+}
+
+function serializeFacts(facts: readonly Fact[]): unknown[] {
+	return facts.map(serializeFact);
+}
+
+function serializeRows(rows: readonly (readonly QueryTerm[])[]): unknown[][] {
+	return rows.map((row) => row.map((term) => serializeValue(term)));
+}
+
+/**
+ * Deserializes tagged values inside a transaction entry tuple (design/03).
+ * Schema declaration objects pass through untouched; 4-tuples are mutations,
+ * 3-tuples are fact triples.
+ */
+function deserializeEntry(entry: unknown): unknown {
+	if (!Array.isArray(entry)) {
+		return entry;
+	}
+
+	const copy = entry.slice();
+	const valueIndex = copy.length === 4 ? 3 : copy.length === 3 ? 2 : -1;
+	if (valueIndex >= 0) {
+		copy[valueIndex] = deserializeValue(copy[valueIndex]);
+	}
+
+	return copy;
+}
+
 export class FatosServer {
 	private db = createDatabase();
 	private server: NodeServer | null = null;
 	private listeners = new Set<(event: ServerEvent) => void>();
 	private websocketServer: WebSocketServer | null = null;
 	private websocketEventUnsubscribe: Unsubscribe | null = null;
+	/** Per-client subscribe registry: subscription id -> live handle (design/03). */
+	private clientSubscriptions = new Map<WebSocket, Map<string, ClientSubscription>>();
 
 	start(options: StartOptions = {}): Promise<ServerAddress> {
 		if (this.server) {
@@ -127,6 +175,18 @@ export class FatosServer {
 		});
 
 		this.websocketServer = new WebSocketServer({ noServer: true });
+		this.websocketServer.on('connection', (client) => {
+			client.on('message', (raw, isBinary) => {
+				if (isBinary) {
+					return;
+				}
+
+				this.handleWebSocketMessage(client, raw.toString());
+			});
+			client.on('close', () => {
+				this.disposeClientSubscriptions(client);
+			});
+		});
 		this.server.on('upgrade', (req, socket, head) => {
 			if (!this.websocketServer) {
 				socket.destroy();
@@ -236,6 +296,129 @@ export class FatosServer {
 		}
 	}
 
+	/**
+	 * P3 subscribe registry protocol (design/03):
+	 *
+	 *   -> { type: 'subscribe', id, spec, afterTx? }
+	 *   <- { type: 'subscribed', id }
+	 *   -> on match: { type: 'facts', id, rows }
+	 *   <- { type: 'unsubscribe', id }
+	 *
+	 * With `afterTx`, the client first receives the current query result
+	 * (catch-up covering everything committed since that tx), then live
+	 * updates. The raw `fact:added` / `transaction:committed` fan-out stays
+	 * untouched.
+	 */
+	private handleWebSocketMessage(client: WebSocket, raw: string): void {
+		let message: unknown;
+		try {
+			message = JSON.parse(raw) as unknown;
+		} catch {
+			return;
+		}
+
+		if (!isObject(message)) {
+			return;
+		}
+
+		if (message.type === 'subscribe') {
+			this.handleSubscribe(client, message);
+			return;
+		}
+
+		if (message.type === 'unsubscribe') {
+			this.handleUnsubscribe(client, message);
+		}
+	}
+
+	private handleSubscribe(client: WebSocket, message: JsonObject): void {
+		const { id, afterTx } = message;
+		if (typeof id !== 'string' || id === '') {
+			return;
+		}
+
+		if (afterTx !== undefined && (typeof afterTx !== 'number' || !Number.isFinite(afterTx))) {
+			return;
+		}
+
+		let spec: QuerySpec;
+		try {
+			spec = deserializeQuerySpec(message.spec);
+		} catch {
+			return;
+		}
+
+		const registry = this.getClientRegistry(client);
+		const existing = registry.get(id);
+		if (existing) {
+			existing.live.dispose();
+		}
+
+		const live = this.db.live(spec);
+		const subscription: ClientSubscription = { id, live };
+		registry.set(id, subscription);
+
+		this.sendWebSocket(client, { type: 'subscribed', id });
+
+		if (afterTx !== undefined) {
+			this.sendWebSocket(client, { type: 'facts', id, rows: serializeRows(live.current) });
+		}
+
+		live.subscribe((rows) => {
+			this.sendWebSocket(client, { type: 'facts', id, rows: serializeRows(rows) });
+		});
+	}
+
+	private handleUnsubscribe(client: WebSocket, message: JsonObject): void {
+		const { id } = message;
+		if (typeof id !== 'string') {
+			return;
+		}
+
+		const registry = this.clientSubscriptions.get(client);
+		const subscription = registry?.get(id);
+		if (!registry || !subscription) {
+			return;
+		}
+
+		subscription.live.dispose();
+		registry.delete(id);
+		if (registry.size === 0) {
+			this.clientSubscriptions.delete(client);
+		}
+	}
+
+	private getClientRegistry(client: WebSocket): Map<string, ClientSubscription> {
+		let registry = this.clientSubscriptions.get(client);
+		if (!registry) {
+			registry = new Map();
+			this.clientSubscriptions.set(client, registry);
+		}
+
+		return registry;
+	}
+
+	private disposeClientSubscriptions(client: WebSocket): void {
+		const registry = this.clientSubscriptions.get(client);
+		if (!registry) {
+			return;
+		}
+
+		for (const subscription of registry.values()) {
+			subscription.live.dispose();
+		}
+
+		this.clientSubscriptions.delete(client);
+	}
+
+	private sendWebSocket(client: WebSocket, payload: JsonObject): void {
+		if (client.readyState !== 1) {
+			return;
+		}
+
+		client.send(JSON.stringify(payload));
+	}
+
 	transact(entries: TransactionEntry[], metadata?: Record<string, unknown>): Fact[] {
 		const facts = this.db.transact(entries, metadata);
 		if (facts.length === 0) {
@@ -332,7 +515,7 @@ export class FatosServer {
 
 			if (method === 'GET' && pathname === '/facts') {
 				const facts = this.filteredFacts(requestUrl.searchParams);
-				writeJson(res, 200, { facts });
+				writeJson(res, 200, { facts: serializeFacts(facts) });
 				return;
 			}
 
@@ -372,9 +555,10 @@ export class FatosServer {
 				const metadata = isObject(body.metadata)
 					? (body.metadata as Record<string, unknown>)
 					: undefined;
-				const facts = this.transact(body.entries as TransactionEntry[], metadata);
+				const entries = (body.entries as unknown[]).map(deserializeEntry) as TransactionEntry[];
+				const facts = this.transact(entries, metadata);
 				writeJson(res, 200, {
-					facts,
+					facts: serializeFacts(facts),
 					transaction: this.db.getTransactions().at(-1) ?? null
 				});
 				return;
@@ -393,7 +577,7 @@ export class FatosServer {
 
 				let entries: TransactionEntry[] = [];
 				if (Array.isArray(body.facts)) {
-					entries = body.facts as Mutation[];
+					entries = (body.facts as unknown[]).map(deserializeEntry) as Mutation[];
 				} else {
 					const op = body.op;
 					const eid = body.eid;
@@ -403,14 +587,40 @@ export class FatosServer {
 						return;
 					}
 
-					entries = [[op, eid, attribute, body.value]];
+					entries = [[op, eid, attribute, deserializeValue(body.value)]];
 				}
 
 				const facts = this.transact(entries, metadata);
 				writeJson(res, 200, {
-					facts,
+					facts: serializeFacts(facts),
 					transaction: this.db.getTransactions().at(-1) ?? null
 				});
+				return;
+			}
+
+			if (method === 'POST' && pathname === '/query') {
+				const body = await readJsonBody(req);
+				if (!isObject(body)) {
+					writeJson(res, 400, { error: 'Request body must include a datalog spec' });
+					return;
+				}
+
+				let spec: QuerySpec;
+				try {
+					spec = deserializeQuerySpec(body.spec);
+				} catch {
+					writeJson(res, 400, { error: 'Request body must include a datalog spec' });
+					return;
+				}
+
+				const txRaw = body.tx;
+				if (txRaw !== undefined && (typeof txRaw !== 'number' || !Number.isFinite(txRaw))) {
+					writeJson(res, 400, { error: 'Invalid tx query value' });
+					return;
+				}
+
+				const rows = this.db.query(spec, txRaw as number | undefined);
+				writeJson(res, 200, { rows: serializeRows(rows) });
 				return;
 			}
 
