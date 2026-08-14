@@ -223,3 +223,47 @@ Remaining tasks are being completed in sequence by spawned sub-agents. After eac
 step the work is validated (`npm run build`, `npm run types`, `npx vitest run` per
 package) and committed. Issues found during validation are logged here and routed
 back to sub-agents for fixes.
+
+## [2026-08-14] core — P2 core reactivity (design/03) implemented
+- **Task**: P2 reactivity core half (docs/design/03-reactivity-and-wire.md, docs/design/04-phasing.md P2)
+- **Found by**: P2 core implementation (packages/core)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Landed `db.live` (access-tracking `live(fn)`, explicit-deps
+  `live(deps, fn)`, and direct `live(specOrCriteria)` forms) and
+  `db.liveQuery(specOrCriteria, { signal })` in `packages/core` only. Access
+  tracking wraps entity states returned by `entity`/`find` in a Proxy that
+  records attribute reads; `find` criteria keys and `query` where-clause
+  attributes are recorded as implicit dependencies even when the selector never
+  touches the results (keeps `live(() => db.find(criteria))` correct). The
+  recorded attribute set is expanded to candidate eids via the AEVT index, and a
+  fact is relevant only if its attribute was recorded and (its entity was a
+  candidate at the last evaluation or the fact introduces a brand-new
+  (eid, attribute) pair — computed pre-append in `transact`). Results are
+  memoized with a JSON-stable key (Date/bigint/ref-aware) and diffed; subscribers
+  are notified only on actual change, once per transaction. `liveQuery` is an
+  async iterable over `{ current, subscribe, dispose }` that yields the initial
+  result then each change; AbortSignal / iterator `return()`/`throw()` /
+  `dispose()` stop delivery. Documented limitations:
+  - **Access tracking covers reads during `fn` only.** A selector that returns
+    an entity without reading attributes (e.g. `() => db.entity(1)`) records no
+    attributes and falls back to re-evaluating on every write (diffing still
+    suppresses spurious notifications). Read the attributes you depend on.
+  - **Dependency granularity is attribute-level** (plus AEVT candidate eids), so
+    a write to a recorded attribute of any candidate entity re-runs the selector
+    even if that entity is not in the result; result diffing filters the
+    notifications.
+  - **`find` with `select` drops the Proxy** (new objects are built), but the
+    criteria keys are still recorded.
+  - **Time-travel reads (`at`/`atTransaction`) inside a live selector are not
+    tracked** (no Proxy there); live selectors read current state.
+  - **`liveQuery` buffers every distinct change** while the consumer is idle; a
+    slow consumer sees intermediate states (no coalescing to latest).
+  - `EntityState` is now exported from `@fatos/core` (additive, previously
+    internal) so the criteria-form live/liveQuery return types are usable.
+- **Resolution**: new `live`/`liveQuery` machinery in core/src/index.ts
+  (types, `stableValueKey`, `AccessTracker`/`LiveHandle`, Proxy wrapping in
+  `entity`, tracking hooks in `find`/`query`, per-transaction `notifyLive`) +
+  new live.test.ts (12 tests). Validation: core build/typecheck/tests green
+  (179 tests), benchmark targets all PASS with no regression.
+

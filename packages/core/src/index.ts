@@ -163,7 +163,24 @@ export type QuerySpec = {
 	where: QueryClause[];
 };
 
-type EntityState = Record<string, unknown> & { id: EntityId };
+export type EntityState = Record<string, unknown> & { id: EntityId };
+
+/** A live-query handle: memoized `current` value plus change subscription (design/03). */
+export type LiveResult<T> = {
+	readonly current: T;
+	/** Registers a change callback; returns an unsubscribe function. */
+	subscribe(callback: (value: T) => void): () => void;
+	/** Stops tracking and notification; `current` stays readable afterwards. */
+	dispose(): void;
+};
+
+/** A `liveQuery` handle: an async iterable of result snapshots plus live accessors. */
+export type LiveQueryResult<T> = LiveResult<T> & AsyncIterable<T>;
+
+export type LiveQueryOptions = {
+	/** When the signal fires, delivery stops (the iterator's return()/throw() work too). */
+	signal?: AbortSignal;
+};
 
 type EAVTIndex = Map<EntityId, Map<string, Fact[]>>;
 type AEVTIndex = Map<string, Map<EntityId, Fact[]>>;
@@ -287,6 +304,75 @@ function refTargetKey(target: RefTarget): string {
 /** Value equality for read-side matching (find criteria, many-attribute dedup). */
 function sameValue(left: unknown, right: unknown): boolean {
 	return valueKey(left) === valueKey(right);
+}
+
+/**
+ * Recursive JSON-stable key for live-result memoization and diffing. Unlike
+ * JSON.stringify this handles every value the engine stores (Date by ms
+ * epoch, BigInt by its string form, ref/lookupRef by target, cardinality-many
+ * arrays) and sorts plain-object keys so identical content keys identically
+ * regardless of insertion order.
+ */
+function stableValueKey(value: unknown): string {
+	if (value === null) {
+		return 'null';
+	}
+
+	if (typeof value === 'string') {
+		return JSON.stringify(value);
+	}
+
+	if (typeof value === 'number') {
+		return Object.is(value, -0) ? '0' : Number.isFinite(value) ? String(value) : 'null';
+	}
+
+	if (typeof value === 'boolean') {
+		return value ? 'true' : 'false';
+	}
+
+	if (typeof value === 'undefined') {
+		return 'undefined';
+	}
+
+	if (typeof value === 'bigint') {
+		return `bigint:${value.toString()}`;
+	}
+
+	if (typeof value === 'symbol') {
+		return 'symbol';
+	}
+
+	if (value instanceof Date) {
+		return `date:${value.getTime()}`;
+	}
+
+	if (isRef(value)) {
+		return `ref:${stableValueKey(value[REF_BRAND])}`;
+	}
+
+	if (isLookupRef(value)) {
+		return `lookupRef:${value[LOOKUP_REF_BRAND].map(stableValueKey).join(':')}`;
+	}
+
+	if (Array.isArray(value)) {
+		let key = '[';
+		for (let i = 0; i < value.length; i += 1) {
+			if (i > 0) {
+				key += ',';
+			}
+			key += stableValueKey(value[i]);
+		}
+		return `${key}]`;
+	}
+
+	if (typeof value === 'object') {
+		const entries = Object.keys(value)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableValueKey((value as Record<string, unknown>)[key])}`);
+		return `{${entries.join(',')}}`;
+	}
+
+	return `${typeof value}:${String(value)}`;
 }
 
 const FIND_OPERATOR_KEYS = new Set([
@@ -641,6 +727,20 @@ function isFactTuple(entry: TransactionEntryInput): entry is FactTuple {
 	return Array.isArray(entry) && entry.length === 3;
 }
 
+function isQuerySpec(value: unknown): value is QuerySpec {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'where' in value &&
+		'find' in value
+	);
+}
+
+/** Array.isArray guard that also narrows readonly string[] out of unions. */
+function isStringArray(value: unknown): value is readonly string[] {
+	return Array.isArray(value);
+}
+
 function matchesValueType(value: unknown, valueType: ValueType): boolean {
 	switch (valueType) {
 		case 'unknown':
@@ -658,6 +758,41 @@ function matchesValueType(value: unknown, valueType: ValueType): boolean {
 	}
 }
 
+/**
+ * Recorded attribute reads while an access-tracking `live(fn)` selector runs.
+ * `attributes` holds every attribute touched (via entity proxies and via the
+ * criteria/where clauses of `find`/`query`); `eidsByAttribute` records the
+ * entities each attribute was actually read on.
+ */
+type AccessTracker = {
+	attributes: Set<string>;
+	eidsByAttribute: Map<string, Set<EntityId>>;
+};
+
+/**
+ * Internal state of one `live`/`liveQuery` instance, owned by FactDatabase so
+ * the notification path can consult the private indexes directly.
+ */
+type LiveHandle<T> = {
+	read: () => T;
+	trackReads: boolean;
+	explicitDeps: ReadonlySet<string> | null;
+	/** attribute -> candidate eids (AEVT members at last evaluation + tracked reads). */
+	dependencies: Map<string, Set<EntityId>>;
+	/** No attributes were recorded — every write is potentially relevant. */
+	fallbackAll: boolean;
+	listeners: Set<(value: T) => void>;
+	memoKey: string | null;
+	memoValue: T | null;
+	hasValue: boolean;
+	disposed: boolean;
+};
+
+/** Disambiguated (eid, attribute) pair key for new-pair detection. */
+function livePairKey(eid: EntityId, attribute: string): string {
+	return `${typeof eid}:${String(eid)}\u0000${attribute}`;
+}
+
 export class FactDatabase {
 	private facts: Fact[] = [];
 	private transactions: TransactionRecord[] = [];
@@ -671,6 +806,10 @@ export class FactDatabase {
 	private schemaByIdent = new Map<string, number>();
 	/** attribute -> valueKey -> holder entity ids, maintained at commit (design/04 unique-index optimization). */
 	private uniqueIndex = new Map<string, Map<string, Set<EntityId>>>();
+	/** Active access tracker while a `live(fn)` selector runs; null outside live evaluation. */
+	private tracking: AccessTracker | null = null;
+	/** Every live/liveQuery instance, consulted once per committed transaction. */
+	private liveInstances = new Set<LiveHandle<unknown>>();
 
 	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
 		const tx = this.nextTx++;
@@ -1188,11 +1327,25 @@ export class FactDatabase {
 		this.validateMutations(mutations);
 
 		const [tx] = this.commitTransaction(metadata);
-		return mutations.map(([op, eid, attribute, value]) => {
+
+		// Snapshot (eid, attribute) pairs that do not exist yet: a fact
+		// introducing a brand-new pair is always relevant to live queries even
+		// when the entity was not a candidate at the last evaluation.
+		const newPairs = new Set<string>();
+		for (const [, eid, attribute] of mutations) {
+			if (!this.aevt.get(attribute)?.has(eid)) {
+				newPairs.add(livePairKey(eid, attribute));
+			}
+		}
+
+		const facts = mutations.map(([op, eid, attribute, value]) => {
 			const fact = this.appendFact(tx, op, eid, attribute, value);
 			this.onFactCommitted(fact);
 			return fact;
 		});
+
+		this.notifyLive(facts, newPairs);
+		return facts;
 	}
 
 	/**
@@ -1377,12 +1530,22 @@ export class FactDatabase {
 			entity[attribute] = value instanceof Map ? Object.freeze(Array.from(value.values())) : value;
 		}
 
-		return Object.freeze(entity);
+		const frozen = Object.freeze(entity);
+		return this.tracking === null ? frozen : this.wrapTrackedEntity(frozen);
 	}
 
 	find(criteria: Record<string, unknown>, options?: number | FindOptions): EntityState[] {
 		const opts: FindOptions = typeof options === 'number' ? { tx: options } : (options ?? {});
 		const txLimit = normalizeTxLimit(opts.tx);
+
+		if (this.tracking !== null) {
+			for (const key of Object.keys(criteria)) {
+				if (key !== 'id') {
+					this.tracking.attributes.add(key);
+				}
+			}
+		}
+
 		const matches: EntityState[] = [];
 
 		for (const eid of this.candidateEidsForCriteria(criteria, txLimit)) {
@@ -1730,8 +1893,52 @@ export class FactDatabase {
 		return { added, retracted };
 	}
 
+	/**
+	 * Live query (design/03). Three forms:
+	 *
+	 * - `live(fn)` — access tracking: while `fn` runs, entity attribute reads
+	 *   (plus `find` criteria / `query` where attributes) are recorded via
+	 *   proxies, and the recorded set narrows the subscription key through the
+	 *   AEVT index. Writes touching only unrelated attributes do not re-run
+	 *   `fn`; the result is memoized and diffed so subscribers are notified
+	 *   only on actual change.
+	 * - `live(deps, fn)` — explicit-dependency variant, no Proxy.
+	 * - `live(specOrCriteria)` — direct QuerySpec / find-criteria form.
+	 */
+	live<T>(fn: () => T): LiveResult<T>;
+	live<T>(deps: readonly string[], fn: () => T): LiveResult<T>;
+	live(spec: QuerySpec): LiveResult<QueryTerm[][]>;
+	live(criteria: Record<string, unknown>): LiveResult<EntityState[]>;
+	live<T>(
+		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		fn?: () => T
+	): LiveResult<T> | LiveResult<QueryTerm[][]> | LiveResult<EntityState[]> {
+		return this.createLiveResult(this.buildLiveHandle(input, fn));
+	}
+
+	/**
+	 * Live query as an async iterable (design/03): yields the initial result,
+	 * then each subsequent change. Cancellation via `AbortSignal`, the
+	 * iterator's `return()`/`throw()`, or `dispose()`.
+	 */
+	liveQuery(spec: QuerySpec, options?: LiveQueryOptions): LiveQueryResult<QueryTerm[][]>;
+	liveQuery(criteria: Record<string, unknown>, options?: LiveQueryOptions): LiveQueryResult<EntityState[]>;
+	liveQuery<T>(
+		input: QuerySpec | Record<string, unknown>,
+		options?: LiveQueryOptions
+	): LiveQueryResult<T> | LiveQueryResult<QueryTerm[][]> | LiveQueryResult<EntityState[]> {
+		return this.createLiveQueryResult(this.buildLiveHandle<T>(input), options);
+	}
+
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
 		const txLimit = normalizeTxLimit(tx);
+
+		if (this.tracking !== null) {
+			for (const [, attribute] of spec.where) {
+				this.tracking.attributes.add(attribute);
+			}
+		}
+
 		const where = spec.where;
 
 		// Assign a positional column to every variable in first-appearance order.
@@ -2204,6 +2411,306 @@ export class FactDatabase {
 
 		if (attribute === 'db/ref' && typeof value === 'boolean') {
 			schema.ref = value;
+		}
+	}
+
+	/**
+	 * Runs `fn` with access tracking active and returns its result plus the
+	 * recorded reads. The previous tracker (if any — nested `live` selectors)
+	 * is restored afterwards.
+	 */
+	private runTracked<T>(fn: () => T): { result: T; tracker: AccessTracker } {
+		const previous = this.tracking;
+		const tracker: AccessTracker = { attributes: new Set(), eidsByAttribute: new Map() };
+		this.tracking = tracker;
+		try {
+			return { result: fn(), tracker };
+		} finally {
+			this.tracking = previous;
+		}
+	}
+
+	/** Wraps a frozen entity state in a Proxy that records attribute reads. */
+	private wrapTrackedEntity(entity: EntityState): EntityState {
+		const tracker = this.tracking as AccessTracker;
+		return new Proxy(entity, {
+			get(target, prop, receiver) {
+				if (typeof prop === 'string' && prop !== 'id') {
+					tracker.attributes.add(prop);
+					let eids = tracker.eidsByAttribute.get(prop);
+					if (!eids) {
+						eids = new Set();
+						tracker.eidsByAttribute.set(prop, eids);
+					}
+					eids.add(target.id);
+				}
+				return Reflect.get(target, prop, receiver);
+			}
+		});
+	}
+
+	/** Dispatches a `live`/`liveQuery` input to a LiveHandle with an initial evaluation. */
+	private buildLiveHandle<T>(
+		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		fn?: () => T
+	): LiveHandle<T> {
+		if (typeof input === 'function') {
+			return this.createLiveHandle(input, true, null);
+		}
+
+		if (isStringArray(input)) {
+			if (fn === undefined) {
+				throw new Error('live(deps, fn) requires a selector function');
+			}
+			return this.createLiveHandle(fn, false, new Set(input));
+		}
+
+		if (isQuerySpec(input)) {
+			const attributes = new Set<string>();
+			for (const [, attribute] of input.where) {
+				attributes.add(attribute);
+			}
+			return this.createLiveHandle(() => this.query(input) as T, false, attributes);
+		}
+
+		const criteria = input;
+		const attributes = new Set<string>();
+		for (const key of Object.keys(criteria)) {
+			if (key !== 'id') {
+				attributes.add(key);
+			}
+		}
+		return this.createLiveHandle(() => this.find(criteria) as T, false, attributes);
+	}
+
+	/** Creates a LiveHandle and runs its initial evaluation before registering it. */
+	private createLiveHandle<T>(read: () => T, trackReads: boolean, explicitDeps: ReadonlySet<string> | null): LiveHandle<T> {
+		const handle: LiveHandle<T> = {
+			read,
+			trackReads,
+			explicitDeps,
+			dependencies: new Map(),
+			fallbackAll: false,
+			listeners: new Set(),
+			memoKey: null,
+			memoValue: null,
+			hasValue: false,
+			disposed: false
+		};
+		this.evaluateLive(handle);
+		this.liveInstances.add(handle as LiveHandle<unknown>);
+		return handle;
+	}
+
+	/** Exposes a handle as the public `{ current, subscribe, dispose }` shape. */
+	private createLiveResult<T>(handle: LiveHandle<T>): LiveResult<T> {
+		const database = this;
+		return {
+			get current(): T {
+				return handle.memoValue as T;
+			},
+			subscribe: (callback: (value: T) => void): (() => void) => {
+				if (handle.disposed) {
+					return () => {};
+				}
+				handle.listeners.add(callback);
+				return () => {
+					handle.listeners.delete(callback);
+				};
+			},
+			dispose: (): void => {
+				if (handle.disposed) {
+					return;
+				}
+				handle.disposed = true;
+				handle.listeners.clear();
+				database.liveInstances.delete(handle as LiveHandle<unknown>);
+			}
+		};
+	}
+
+	/**
+	 * Wraps a live handle in an async iterable (design/03): yields the initial
+	 * result, then each subsequent change, buffering deltas that arrive while
+	 * the consumer is idle. AbortSignal, iterator `return()`/`throw()`, and
+	 * `dispose()` all stop delivery.
+	 */
+	private createLiveQueryResult<T>(handle: LiveHandle<T>, options?: LiveQueryOptions): LiveQueryResult<T> {
+		const liveResult = this.createLiveResult(handle);
+		const signal = options?.signal;
+		const queue: T[] = [];
+		let resolveNext: (() => void) | null = null;
+		let disposed = false;
+
+		const unsubscribe = liveResult.subscribe((value) => {
+			queue.push(value);
+			if (resolveNext !== null) {
+				resolveNext();
+				resolveNext = null;
+			}
+		});
+
+		const dispose = (): void => {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+			unsubscribe();
+			if (signal) {
+				signal.removeEventListener('abort', abort);
+			}
+			liveResult.dispose();
+			if (resolveNext !== null) {
+				resolveNext();
+				resolveNext = null;
+			}
+		};
+
+		const abort = (): void => {
+			dispose();
+		};
+
+		if (signal) {
+			if (signal.aborted) {
+				dispose();
+			} else {
+				signal.addEventListener('abort', abort, { once: true });
+			}
+		}
+
+		return {
+			get current(): T {
+				return handle.memoValue as T;
+			},
+			subscribe: liveResult.subscribe,
+			dispose,
+			async *[Symbol.asyncIterator](): AsyncGenerator<T> {
+				try {
+					if (disposed) {
+						return;
+					}
+					// Changes that arrived before iteration started are already
+					// reflected in `current`; drop the buffered duplicates.
+					queue.length = 0;
+					yield handle.memoValue as T;
+					while (!disposed) {
+						if (queue.length > 0) {
+							yield queue.shift() as T;
+						} else {
+							await new Promise<void>((resolve) => {
+								resolveNext = resolve;
+							});
+						}
+					}
+				} finally {
+					dispose();
+				}
+			}
+		};
+	}
+
+	/**
+	 * Re-evaluates a live handle: runs the selector (with access tracking for
+	 * the `live(fn)` form), refreshes the AEVT-narrowed dependency map, diffs
+	 * the result against the memoized key, and notifies listeners only when
+	 * the result actually changed (keeping the previous object identity
+	 * otherwise).
+	 */
+	private evaluateLive<T>(handle: LiveHandle<T>): void {
+		let tracker: AccessTracker | null = null;
+		let value: T;
+		if (handle.trackReads) {
+			const tracked = this.runTracked(handle.read);
+			tracker = tracked.tracker;
+			value = tracked.result;
+		} else {
+			value = handle.read();
+		}
+
+		this.updateLiveDependencies(handle as LiveHandle<unknown>, tracker);
+
+		const key = stableValueKey(value);
+		if (handle.hasValue && key === handle.memoKey) {
+			return;
+		}
+
+		handle.memoKey = key;
+		handle.memoValue = value;
+		handle.hasValue = true;
+
+		for (const listener of [...handle.listeners]) {
+			listener(value);
+		}
+	}
+
+	/**
+	 * Builds the subscription key: for every recorded (or explicitly listed)
+	 * attribute, the candidate eid set is the union of the AEVT members at
+	 * this evaluation and the entities the attribute was actually read on.
+	 * With no recorded attributes the handle falls back to watching every
+	 * write (a selector that reads nothing cannot be narrowed).
+	 */
+	private updateLiveDependencies(handle: LiveHandle<unknown>, tracker: AccessTracker | null): void {
+		const attributes = handle.explicitDeps ?? tracker?.attributes ?? null;
+		if (attributes === null || attributes.size === 0) {
+			handle.fallbackAll = true;
+			handle.dependencies = new Map();
+			return;
+		}
+
+		handle.fallbackAll = false;
+		const dependencies = new Map<string, Set<EntityId>>();
+		for (const attribute of attributes) {
+			const eids = new Set<EntityId>();
+			const aevtEntities = this.aevt.get(attribute);
+			if (aevtEntities) {
+				for (const eid of aevtEntities.keys()) {
+					eids.add(eid);
+				}
+			}
+			if (tracker) {
+				for (const eid of tracker.eidsByAttribute.get(attribute) ?? []) {
+					eids.add(eid);
+				}
+			}
+			dependencies.set(attribute, eids);
+		}
+		handle.dependencies = dependencies;
+	}
+
+	/**
+	 * True when a committed fact can affect the handle's result: the fact's
+	 * attribute is recorded and either its entity was a candidate at the last
+	 * evaluation or the fact introduces a brand-new (entity, attribute) pair.
+	 */
+	private liveFactRelevant(handle: LiveHandle<unknown>, fact: Fact, newPairs: ReadonlySet<string>): boolean {
+		if (handle.fallbackAll) {
+			return true;
+		}
+
+		const [eid, attribute] = fact;
+		const candidates = handle.dependencies.get(attribute);
+		if (!candidates) {
+			return false;
+		}
+
+		return candidates.has(eid) || newPairs.has(livePairKey(eid, attribute));
+	}
+
+	/** Re-evaluates every live handle touched by the transaction, once per transaction. */
+	private notifyLive(facts: readonly Fact[], newPairs: ReadonlySet<string>): void {
+		if (this.liveInstances.size === 0) {
+			return;
+		}
+
+		const instances = [...this.liveInstances];
+		for (const handle of instances) {
+			if (handle.disposed) {
+				continue;
+			}
+			if (facts.some((fact) => this.liveFactRelevant(handle, fact, newPairs))) {
+				this.evaluateLive(handle);
+			}
 		}
 	}
 
