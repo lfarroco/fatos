@@ -7,7 +7,7 @@ import WebSocket from 'ws';
 import { createFatosServer, version } from './index';
 import type { StorageAdapter } from '@fatos/persistence';
 import { MemoryAdapter } from '@fatos/persistence';
-import { deserializeValue, isRef, REF_BRAND } from '@fatos/core';
+import { deserializeValue, isRef, ref, REF_BRAND } from '@fatos/core';
 
 /** Polls `messages` until `predicate` matches one of them or the timeout hits. */
 function waitForMessage(
@@ -593,6 +593,111 @@ describe('@fatos/server', () => {
 			server.transact([['add', 1, 'type', 'user']]);
 			await expect(server.flush()).rejects.toThrow(/disk full/);
 		} finally {
+			await server.stop();
+		}
+	});
+
+	it('streams full fact logs with afterTx catch-up and live sync-events', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		// Seed: tx 1 = schema + data, tx 2 = a ref value (exercises wire tags).
+		server.transact([
+			{ ident: 'user/name', valueType: 'string', cardinality: 'one' },
+			['add', 1, 'user/name', 'Alice'],
+			['add', 1, 'user/age', 30]
+		]);
+		server.transact([['add', 1, 'user/manager', ref(2)]]);
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		const withId = (type: string) => (message: unknown): boolean => {
+			const msg = message as { type?: string; id?: string };
+			return msg.type === type && msg.id === 'sync-1';
+		};
+
+		try {
+			socket.send(JSON.stringify({ type: 'sync', id: 'sync-1', afterTx: 1 }));
+
+			await waitForMessage(messages, withId('synced'));
+
+			// Catch-up: only facts/transactions with tx > 1.
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; facts?: unknown[] };
+				return (
+					msg.type === 'facts'
+					&& msg.facts?.length === 1
+					&& (msg.facts[0] as [unknown, unknown, unknown])[1] === 'user/manager'
+				);
+			});
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; transactions?: unknown[] };
+				return msg.type === 'transactions' && msg.transactions?.length === 1;
+			});
+
+			// Live sync-event for a commit that happens after the sync.
+			server.transact([['add', 3, 'user/name', 'Bob']]);
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; event?: { transaction?: [number] } };
+				return msg.type === 'sync-event' && msg.event?.transaction?.[0] === 3;
+			});
+
+			// The ref value survived the wire (tagged $ref, deserializable).
+			const factsFrame = messages.find(withId('facts')) as { facts: unknown[][] } | undefined;
+			expect(factsFrame).toBeDefined();
+			expect(isRef(deserializeValue(factsFrame?.facts[0]?.[2]))).toBe(true);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('syncs the full log when afterTx is omitted and ignores unknown ids on unsubscribe', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		server.transact([['add', 1, 'type', 'user']]);
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		try {
+			socket.send(JSON.stringify({ type: 'sync', id: 'full' }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'synced' && msg.id === 'full';
+			});
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; facts?: unknown[] };
+				return msg.type === 'facts' && msg.facts?.length === 1;
+			});
+
+			// Unsubscribing a sync id stops live sync-events.
+			socket.send(JSON.stringify({ type: 'unsubscribe', id: 'full' }));
+			socket.send(JSON.stringify({ type: 'unsubscribe', id: 'never-existed' })); // no-op, no throw
+
+			// WS messages from one client are processed in order, so the
+			// 'synced' ack for a follow-up sync proves the server processed
+			// the unsubscribes before we commit below.
+			socket.send(JSON.stringify({ type: 'sync', id: 'probe' }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'synced' && msg.id === 'probe';
+			});
+
+			server.transact([['add', 2, 'type', 'admin']]);
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string; event?: { transaction?: [number] } };
+				return msg.type === 'sync-event' && msg.id === 'probe' && msg.event?.transaction?.[0] === 2;
+			});
+
+			// The unsubscribed id receives no further sync-events.
+			const fullEvents = messages.filter(
+				(message) => (message as { type?: string; id?: string }).type === 'sync-event'
+					&& (message as { id?: string }).id === 'full'
+			);
+			expect(fullEvents).toHaveLength(0);
+		} finally {
+			socket.close();
 			await server.stop();
 		}
 	});

@@ -6,6 +6,7 @@
 import { LOOKUP_REF_BRAND, REF_BRAND } from '@fatos/core';
 import type { DiffResult, FactOperation } from '@fatos/core';
 import type { EntityId, Fact, FactDatabase, TransactionRecord } from '@fatos/client';
+import type { FactSnapshot } from './snapshot';
 
 export type TimelineEntry = {
 	tx: number;
@@ -211,5 +212,35 @@ export function filterFacts(facts: readonly Fact[], filter: FactFilter = {}): Fa
 		}
 		return true;
 	});
+}
+
+/** The facts committed at or before `tx` — the head of the log at a point in time. */
+export function factsAtOrBefore(facts: readonly Fact[], tx: number): Fact[] {
+	return facts.filter((fact) => fact[3] <= tx);
+}
+
+/** The transaction ledger entries at or before `tx`. */
+export function transactionsAtOrBefore(transactions: readonly TransactionRecord[], tx: number): TransactionRecord[] {
+	return transactions.filter(([transactionTx]) => transactionTx <= tx);
+}
+
+/**
+ * Builds the point-in-time `FactSnapshot` for transaction `tx` (Phase 6 time
+ * travel): facts and transactions at or before `tx`, keeping the restore
+ * invariants (facts ascending by tx, transaction ledger strictly ascending,
+ * tx sets matching exactly), so the result can be fed straight back into
+ * `db.restore()` / `DevtoolsPanelController.setSnapshot`. Out-of-range `tx`
+ * values clamp naturally: below the first transaction yields an empty
+ * snapshot, above the last yields the full snapshot.
+ */
+export function buildScopedSnapshot(snapshot: FactSnapshot, tx: number): FactSnapshot {
+	const facts = factsAtOrBefore(snapshot.facts, tx);
+	const transactions = transactionsAtOrBefore(snapshot.transactions, tx);
+	return {
+		facts,
+		transactions,
+		capturedAt: snapshot.capturedAt,
+		url: snapshot.url
+	};
 }
 

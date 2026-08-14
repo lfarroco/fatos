@@ -11,6 +11,7 @@
 import type { EntityId, Fact, QueryTerm, TransactionRecord } from '@fatos/client';
 import type { DiffResult } from '@fatos/core';
 import { computeTimeline, formatValue } from './transforms';
+import type { GraphLayout, GraphModel } from './graph';
 
 type Style = Partial<CSSStyleDeclaration>;
 
@@ -294,4 +295,79 @@ export function renderNotice(message: string): HTMLElement | null {
 		fontSize: '12px',
 		padding: '16px 8px'
 	}, message);
+}
+
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+
+/**
+ * Renders the graph model as an inline SVG (Phase 6 graph tab): straight-line
+ * edges labeled with the attribute name, nodes as filled circles with text
+ * labels. Deterministic — positions come from {@link layoutGraph}, so the
+ * same model always draws the same picture. Document-guarded: returns `null`
+ * when `document` is unavailable.
+ */
+export function renderGraphSvg(model: GraphModel, layout: GraphLayout): SVGElement | null {
+	if (typeof document === 'undefined') {
+		return null;
+	}
+
+	const svg = document.createElementNS(SVG_NAMESPACE, 'svg') as SVGElement;
+	svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+	svg.setAttribute('width', '100%');
+	svg.setAttribute('height', String(layout.height));
+	svg.style.display = 'block';
+	svg.style.background = '#ffffff';
+	svg.style.border = '1px solid #e2e8f0';
+	svg.style.borderRadius = '6px';
+	svg.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+	for (const edge of model.edges) {
+		const from = layout.positions.get(edge.from);
+		const to = layout.positions.get(edge.to);
+		if (from === undefined || to === undefined) {
+			continue;
+		}
+
+		const line = document.createElementNS(SVG_NAMESPACE, 'line');
+		line.setAttribute('x1', String(from.x));
+		line.setAttribute('y1', String(from.y));
+		line.setAttribute('x2', String(to.x));
+		line.setAttribute('y2', String(to.y));
+		line.setAttribute('stroke', '#94a3b8');
+		line.setAttribute('stroke-width', '1.5');
+		svg.appendChild(line);
+
+		const label = document.createElementNS(SVG_NAMESPACE, 'text');
+		label.setAttribute('x', String((from.x + to.x) / 2));
+		label.setAttribute('y', String((from.y + to.y) / 2 - 4));
+		label.setAttribute('text-anchor', 'middle');
+		label.setAttribute('fill', '#64748b');
+		label.setAttribute('font-size', '10');
+		label.textContent = edge.attribute;
+		svg.appendChild(label);
+	}
+
+	for (const node of model.nodes) {
+		const position = layout.positions.get(node.id);
+		if (position === undefined) {
+			continue;
+		}
+
+		const circle = document.createElementNS(SVG_NAMESPACE, 'circle');
+		circle.setAttribute('cx', String(position.x));
+		circle.setAttribute('cy', String(position.y));
+		circle.setAttribute('r', '6');
+		circle.setAttribute('fill', '#0f172a');
+		svg.appendChild(circle);
+
+		const label = document.createElementNS(SVG_NAMESPACE, 'text');
+		label.setAttribute('x', String(position.x + 10));
+		label.setAttribute('y', String(position.y + 4));
+		label.setAttribute('fill', '#0f172a');
+		label.setAttribute('font-size', '11');
+		label.textContent = node.label;
+		svg.appendChild(label);
+	}
+
+	return svg;
 }

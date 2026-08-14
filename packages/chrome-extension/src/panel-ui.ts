@@ -1,12 +1,15 @@
 import {
 	DevtoolsPanelController,
+	buildGraphModel,
 	downloadSnapshot,
 	formatValue,
 	groupFactsByEntity,
+	layoutGraph,
 	pickSnapshotFile,
 	renderDiff,
 	renderEntityView,
 	renderFactTable,
+	renderGraphSvg,
 	renderNotice,
 	renderQueryResults,
 	renderTimeline,
@@ -48,7 +51,7 @@ type ChromeLike = {
 	};
 };
 
-const TABS: DevtoolsTabId[] = ['facts', 'entities', 'timeline', 'diff', 'query'];
+const TABS: DevtoolsTabId[] = ['facts', 'entities', 'timeline', 'diff', 'query', 'time-travel', 'graph'];
 
 const controller = new DevtoolsPanelController();
 
@@ -113,7 +116,7 @@ function setText(id: string, text: string): void {
 	element.textContent = text;
 }
 
-function appendNode(container: HTMLElement, node: HTMLElement | null): void {
+function appendNode(container: HTMLElement, node: Node | null): void {
 	if (node !== null) {
 		container.appendChild(node);
 	}
@@ -323,6 +326,127 @@ function renderQueryTab(content: HTMLElement): void {
 	content.appendChild(console.root);
 }
 
+let timeTravelConsole: {
+	root: HTMLElement;
+	slider: HTMLInputElement;
+	numberInput: HTMLInputElement;
+	reset: HTMLButtonElement;
+	summary: HTMLElement;
+	diff: HTMLElement;
+} | null = null;
+
+function getTimeTravelConsole(): {
+	root: HTMLElement;
+	slider: HTMLInputElement;
+	numberInput: HTMLInputElement;
+	reset: HTMLButtonElement;
+	summary: HTMLElement;
+	diff: HTMLElement;
+} {
+	if (timeTravelConsole !== null) {
+		return timeTravelConsole;
+	}
+
+	const root = document.createElement('div');
+	root.style.cssText = 'display: flex; flex-direction: column; gap: 10px; font-size: 12px;';
+
+	const row = document.createElement('div');
+	row.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+	const slider = document.createElement('input');
+	slider.type = 'range';
+	slider.min = '1';
+	slider.max = '1';
+	slider.value = '1';
+	slider.style.cssText = 'flex: 1;';
+	slider.addEventListener('input', () => {
+		controller.setTimeTravelTx(Number(slider.value));
+	});
+
+	const numberInput = document.createElement('input');
+	numberInput.type = 'number';
+	numberInput.min = '1';
+	numberInput.style.cssText = 'width: 72px;';
+	numberInput.addEventListener('change', () => {
+		controller.setTimeTravelTx(Number(numberInput.value));
+	});
+
+	const reset = document.createElement('button');
+	reset.type = 'button';
+	reset.textContent = 'Latest';
+	reset.addEventListener('click', () => {
+		controller.setTimeTravelTx(null);
+	});
+
+	row.appendChild(document.createTextNode('at tx'));
+	row.appendChild(slider);
+	row.appendChild(numberInput);
+	row.appendChild(reset);
+
+	const summary = document.createElement('div');
+	summary.style.cssText = 'color: #334155;';
+
+	const diff = document.createElement('div');
+
+	root.appendChild(row);
+	root.appendChild(summary);
+	root.appendChild(diff);
+
+	timeTravelConsole = { root, slider, numberInput, reset, summary, diff };
+	return timeTravelConsole;
+}
+
+function renderTimeTravelTab(content: HTMLElement): void {
+	const transactions = controller.getTransactions();
+	if (transactions.length === 0) {
+		appendNode(content, renderNotice('no transactions yet; nothing to time travel over'));
+		return;
+	}
+
+	const maxTx = transactions[transactions.length - 1][0];
+	const pinned = controller.getTimeTravelTx();
+	const selected = pinned ?? maxTx;
+	const console = getTimeTravelConsole();
+
+	console.slider.max = String(maxTx);
+	console.numberInput.max = String(maxTx);
+	console.slider.value = String(selected);
+	console.numberInput.value = String(selected);
+
+	const facts = controller.getFacts();
+	const entityCount = new Set(facts.map((fact) => fact[0])).size;
+	console.summary.textContent = pinned === null
+		? `viewing latest state (tx ${maxTx}) — ${facts.length} facts, ${entityCount} entities`
+		: `pinned at tx ${pinned} of ${maxTx} — ${facts.length} facts, ${entityCount} entities`;
+
+	console.diff.textContent = '';
+	const stepDiff = controller.getTimeTravelDiff(selected);
+	if (stepDiff === null || (stepDiff.added.length === 0 && stepDiff.retracted.length === 0)) {
+		appendNode(console.diff, renderNotice('no changes in this transaction'));
+	} else {
+		appendNode(console.diff, renderDiff(stepDiff));
+	}
+
+	content.appendChild(console.root);
+}
+
+function renderGraphTab(content: HTMLElement): void {
+	const model = buildGraphModel(controller.getFacts(), controller.getSchemas());
+	if (model.nodes.length === 0) {
+		appendNode(content, renderNotice('no entities to graph yet'));
+		return;
+	}
+
+	const layout = layoutGraph(model, { width: 640, height: 460 });
+	appendNode(content, renderGraphSvg(model, layout));
+
+	const pinned = controller.getTimeTravelTx();
+	const summary = document.createElement('div');
+	summary.style.cssText = 'color: #64748b; font-size: 12px; margin-top: 8px;';
+	summary.textContent = `${model.nodes.length} nodes · ${model.edges.length} edges${pinned === null ? '' : ` (at tx ${pinned})`} — ref attributes only; deterministic circle layout`;
+	content.appendChild(summary);
+}
+
 function renderActiveTab(): void {
 	const content = document.getElementById('panel-content');
 	if (!content) {
@@ -351,6 +475,12 @@ function renderActiveTab(): void {
 			break;
 		case 'query':
 			renderQueryTab(content);
+			break;
+		case 'time-travel':
+			renderTimeTravelTab(content);
+			break;
+		case 'graph':
+			renderGraphTab(content);
 			break;
 	}
 }

@@ -2,13 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { createDatabase, lookupRef, ref } from '@fatos/core';
 import type { Fact, TransactionRecord } from '@fatos/client';
 import {
+	buildScopedSnapshot,
 	computeDiff,
 	computeTimeline,
+	factsAtOrBefore,
 	filterFacts,
 	formatValue,
 	groupFactsByEntity,
-	stableValueKey
+	stableValueKey,
+	transactionsAtOrBefore
 } from './transforms';
+import type { FactSnapshot } from './snapshot';
 
 describe('groupFactsByEntity', () => {
 	it('groups facts by entity preserving order', () => {
@@ -139,5 +143,62 @@ describe('stableValueKey', () => {
 		expect(stableValueKey(ref(5))).toBe(stableValueKey(ref(5)));
 		expect(stableValueKey(ref(5))).not.toBe(stableValueKey(ref(6)));
 		expect(stableValueKey(['a', 1])).toBe(stableValueKey(['a', 1]));
+	});
+});
+
+describe('factsAtOrBefore / transactionsAtOrBefore', () => {
+	const facts: Fact[] = [
+		[1, 'a', 'x', 1, 'add'],
+		[1, 'b', 'y', 2, 'add'],
+		[2, 'a', 'z', 3, 'add']
+	];
+	const transactions: TransactionRecord[] = [
+		[1, 100, null],
+		[2, 200, null],
+		[3, 300, null]
+	];
+
+	it('keeps only facts and transactions at or before the tx', () => {
+		expect(factsAtOrBefore(facts, 2)).toEqual([facts[0], facts[1]]);
+		expect(transactionsAtOrBefore(transactions, 2)).toEqual([transactions[0], transactions[1]]);
+	});
+
+	it('clamps naturally at the ends of the log', () => {
+		expect(factsAtOrBefore(facts, 0)).toEqual([]);
+		expect(transactionsAtOrBefore(transactions, 0)).toEqual([]);
+		expect(factsAtOrBefore(facts, 99)).toEqual(facts);
+		expect(transactionsAtOrBefore(transactions, 99)).toEqual(transactions);
+	});
+});
+
+describe('buildScopedSnapshot', () => {
+	const snapshot: FactSnapshot = {
+		facts: [
+			[1, 'name', 'Alice', 1, 'add'],
+			[1, 'age', 30, 2, 'add'],
+			[1, 'age', 30, 3, 'retract'],
+			[1, 'age', 31, 4, 'add']
+		],
+		transactions: [
+			[1, 1000, null],
+			[2, 2000, null],
+			[3, 3000, null],
+			[4, 4000, null]
+		],
+		url: 'https://example.test/'
+	};
+
+	it('scopes both facts and transactions to the tx', () => {
+		const scoped = buildScopedSnapshot(snapshot, 2);
+		expect(scoped.facts).toEqual([snapshot.facts[0], snapshot.facts[1]]);
+		expect(scoped.transactions).toEqual([snapshot.transactions[0], snapshot.transactions[1]]);
+		expect(scoped.url).toBe('https://example.test/');
+	});
+
+	it('produces a snapshot that restore() accepts (tx sets still match)', () => {
+		const db = createDatabase();
+		db.restore(buildScopedSnapshot(snapshot, 3));
+		expect(db.getFacts()).toEqual([snapshot.facts[0], snapshot.facts[1], snapshot.facts[2]]);
+		expect(db.getTransactions()).toHaveLength(3);
 	});
 });

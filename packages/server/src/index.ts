@@ -179,6 +179,8 @@ export class FatosServer {
 	private websocketEventUnsubscribe: Unsubscribe | null = null;
 	/** Per-client subscribe registry: subscription id -> live handle (design/03). */
 	private clientSubscriptions = new Map<WebSocket, Map<string, ClientSubscription>>();
+	/** Per-client fact-sync registry (Phase 6): subscription id -> unsubscribe. */
+	private syncSubscriptions = new Map<WebSocket, Map<string, { id: string; unsubscribe: Unsubscribe }>>();
 
 	constructor(options: FatosServerOptions = {}) {
 		this.storage = options.storage ?? null;
@@ -369,6 +371,11 @@ export class FatosServer {
 			return;
 		}
 
+		if (message.type === 'sync') {
+			this.handleSync(client, message);
+			return;
+		}
+
 		if (message.type === 'unsubscribe') {
 			this.handleUnsubscribe(client, message);
 		}
@@ -421,6 +428,7 @@ export class FatosServer {
 		const registry = this.clientSubscriptions.get(client);
 		const subscription = registry?.get(id);
 		if (!registry || !subscription) {
+			this.disposeSyncSubscription(client, id);
 			return;
 		}
 
@@ -429,6 +437,7 @@ export class FatosServer {
 		if (registry.size === 0) {
 			this.clientSubscriptions.delete(client);
 		}
+		this.disposeSyncSubscription(client, id);
 	}
 
 	private getClientRegistry(client: WebSocket): Map<string, ClientSubscription> {
@@ -443,15 +452,102 @@ export class FatosServer {
 
 	private disposeClientSubscriptions(client: WebSocket): void {
 		const registry = this.clientSubscriptions.get(client);
-		if (!registry) {
+		if (registry) {
+			for (const subscription of registry.values()) {
+				subscription.live.dispose();
+			}
+			this.clientSubscriptions.delete(client);
+		}
+
+		const syncRegistry = this.syncSubscriptions.get(client);
+		if (syncRegistry) {
+			for (const { unsubscribe } of syncRegistry.values()) {
+				unsubscribe();
+			}
+			this.syncSubscriptions.delete(client);
+		}
+	}
+
+	/**
+	 * Phase 6 fact-sync subscription: streams the full fact log + transaction
+	 * ledger since `afterTx` (catch-up), then live `transaction:committed`
+	 * events — the full-facts counterpart of the spec-scoped subscribe
+	 * registry (design/03 `afterTx` catch-up primitive).
+	 *
+	 *   -> { type: 'sync', id, afterTx? }
+	 *   <- { type: 'synced', id }
+	 *   <- { type: 'facts', id, facts }            // facts with tx > afterTx
+	 *   <- { type: 'transactions', id, transactions } // ledger with tx > afterTx
+	 *   <- live: { type: 'sync-event', id, event }
+	 *
+	 * The live subscription is registered *before* the catch-up is computed
+	 * and sent; everything runs synchronously in one event-loop tick, so a
+	 * commit can never fall into the gap between the catch-up snapshot and the
+	 * live stream.
+	 */
+	private handleSync(client: WebSocket, message: JsonObject): void {
+		const { id, afterTx } = message;
+		if (typeof id !== 'string' || id === '') {
 			return;
 		}
 
-		for (const subscription of registry.values()) {
-			subscription.live.dispose();
+		if (afterTx !== undefined && (typeof afterTx !== 'number' || !Number.isFinite(afterTx))) {
+			return;
 		}
 
-		this.clientSubscriptions.delete(client);
+		const syncRegistry = this.syncSubscriptions.get(client);
+		const existing = syncRegistry?.get(id);
+		if (existing) {
+			existing.unsubscribe();
+		}
+
+		const unsubscribe = this.subscribe((event) => {
+			if (event.type !== 'transaction:committed') {
+				return;
+			}
+			this.sendWebSocket(client, {
+				type: 'sync-event',
+				id,
+				event: {
+					type: event.type,
+					transaction: event.transaction,
+					facts: serializeFacts(event.facts)
+				}
+			});
+		});
+		const registry = this.getSyncRegistry(client);
+		registry.set(id, { id, unsubscribe });
+
+		this.sendWebSocket(client, { type: 'synced', id });
+
+		const facts = this.db.getFacts().filter((fact) => afterTx === undefined || fact[3] > afterTx);
+		const transactions = this.db.getTransactions().filter(([tx]) => afterTx === undefined || tx > afterTx);
+		this.sendWebSocket(client, { type: 'facts', id, facts: serializeFacts(facts) });
+		this.sendWebSocket(client, { type: 'transactions', id, transactions });
+	}
+
+	private getSyncRegistry(client: WebSocket): Map<string, { id: string; unsubscribe: Unsubscribe }> {
+		let registry = this.syncSubscriptions.get(client);
+		if (!registry) {
+			registry = new Map();
+			this.syncSubscriptions.set(client, registry);
+		}
+
+		return registry;
+	}
+
+	private disposeSyncSubscription(client: WebSocket, id: string): void {
+		const registry = this.syncSubscriptions.get(client);
+		const subscription = registry?.get(id);
+		if (!registry || !subscription) {
+			return;
+		}
+
+		subscription.unsubscribe();
+		registry.delete(id);
+		if (registry.size === 0) {
+			this.syncSubscriptions.delete(client);
+		}
 	}
 
 	private sendWebSocket(client: WebSocket, payload: JsonObject): void {

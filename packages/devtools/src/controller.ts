@@ -10,14 +10,15 @@
  */
 
 import { createClient } from '@fatos/client';
-import type { FatosClient, Fact, QuerySpec, QueryTerm, TransactionRecord } from '@fatos/client';
+import type { FatosClient, Fact, QuerySpec, QueryTerm, SchemaInfo, TransactionRecord } from '@fatos/client';
 import { createDatabase, deserializeValue } from '@fatos/core';
 import type { DiffResult, FactDatabase } from '@fatos/core';
 import { deserializeSnapshot, serializeSnapshot } from './export-import';
 import { isFactSnapshot } from './snapshot';
 import type { FactSnapshot } from './snapshot';
+import { buildScopedSnapshot } from './transforms';
 
-export type DevtoolsTabId = 'facts' | 'entities' | 'timeline' | 'diff' | 'query';
+export type DevtoolsTabId = 'facts' | 'entities' | 'timeline' | 'diff' | 'query' | 'time-travel' | 'graph';
 
 export type DevtoolsRenderCallback = (controller: DevtoolsPanelController) => void;
 
@@ -33,14 +34,21 @@ function normalizeSnapshot(snapshot: FactSnapshot): FactSnapshot {
 
 export class DevtoolsPanelController {
 	private snapshot: FactSnapshot | null = null;
+	/** The wire-value-normalized replay source used to rebuild scoped clients. */
+	private normalizedSnapshot: FactSnapshot | null = null;
+	/** The full snapshot database — diffs always run against this, never the scoped one. */
+	private fullDb: FactDatabase | null = null;
 	private db: FactDatabase | null = null;
 	private client: FatosClient | null = null;
 	private activeTab: DevtoolsTabId = 'facts';
 	private lastDiff: DiffResult | null = null;
+	private lastTimeTravelDiff: DiffResult | null = null;
 	private lastQueryRows: QueryTerm[][] | null = null;
 	private lastQuerySpec: QuerySpec | null = null;
 	private lastQueryError: string | null = null;
 	private lastError: string | null = null;
+	/** The pinned time-travel transaction, or `null` for the latest state. */
+	private timeTravelTx: number | null = null;
 	private renderCallbacks = new Map<DevtoolsTabId, DevtoolsRenderCallback>();
 
 	/**
@@ -57,8 +65,9 @@ export class DevtoolsPanelController {
 		}
 
 		const db = createDatabase();
+		const normalized = normalizeSnapshot(snapshot);
 		try {
-			db.restore(normalizeSnapshot(snapshot));
+			db.restore(normalized);
 		} catch (error) {
 			this.lastError = `snapshot rejected: ${error instanceof Error ? error.message : String(error)}`;
 			this.notifyAll();
@@ -66,10 +75,14 @@ export class DevtoolsPanelController {
 		}
 
 		this.snapshot = snapshot;
+		this.normalizedSnapshot = normalized;
+		this.fullDb = db;
 		this.db = db;
 		this.client = createClient(db);
+		this.timeTravelTx = null;
 		this.lastError = null;
 		this.lastDiff = null;
+		this.lastTimeTravelDiff = null;
 		this.lastQueryRows = null;
 		this.lastQuerySpec = null;
 		this.lastQueryError = null;
@@ -91,6 +104,11 @@ export class DevtoolsPanelController {
 
 	getSnapshot(): FactSnapshot | null {
 		return this.snapshot;
+	}
+
+	/** Schema declarations of the current (scoped) client, used by the graph tab. */
+	getSchemas(): SchemaInfo[] {
+		return this.client?.getSchemas() ?? [];
 	}
 
 	/** Last error from `setSnapshot` (invalid payload / rejected restore), if any. */
@@ -135,19 +153,90 @@ export class DevtoolsPanelController {
 	 * (wraps `FactDatabase.diff`). Returns `null` when no snapshot is loaded.
 	 */
 	getDiff(txA: number, txB: number): DiffResult | null {
-		if (this.db === null) {
+		const db = this.fullDb ?? this.db;
+		if (db === null) {
 			this.lastDiff = null;
 			this.notify('diff');
 			return null;
 		}
 
-		this.lastDiff = this.db.diff(txA, txB);
+		this.lastDiff = db.diff(txA, txB);
 		this.notify('diff');
 		return this.lastDiff;
 	}
 
 	getLastDiff(): DiffResult | null {
 		return this.lastDiff;
+	}
+
+	/**
+	 * Pins the client to the state at transaction `tx` (Phase 6 time travel):
+	 * the client is rebuilt from a snapshot scoped to facts/transactions at or
+	 * before `tx` (`buildScopedSnapshot`), so the Facts/Entities/Query tabs all
+	 * reflect that point in time. Pass `null` to return to the latest state.
+	 * The full snapshot database is kept for diffs. Returns `false` (and
+	 * records a `lastError`) when no snapshot is loaded. Notifies every tab.
+	 */
+	setTimeTravelTx(tx: number | null): boolean {
+		if (this.normalizedSnapshot === null || this.client === null) {
+			this.lastError = 'no snapshot loaded; nothing to time travel over';
+			this.notifyAll();
+			return false;
+		}
+
+		if (tx !== null && (!Number.isInteger(tx) || tx < 1)) {
+			this.lastError = `invalid time-travel tx ${String(tx)}: expected a positive integer or null`;
+			this.notifyAll();
+			return false;
+		}
+
+		const scopedSnapshot = tx === null ? this.normalizedSnapshot : buildScopedSnapshot(this.normalizedSnapshot, tx);
+		const db = createDatabase();
+		try {
+			db.restore(scopedSnapshot);
+		} catch (error) {
+			this.lastError = `time-travel rejected: ${error instanceof Error ? error.message : String(error)}`;
+			this.notifyAll();
+			return false;
+		}
+
+		this.db = db;
+		this.client = createClient(db);
+		this.timeTravelTx = tx;
+		this.lastError = null;
+		this.lastDiff = null;
+		this.lastQueryRows = null;
+		this.lastQuerySpec = null;
+		this.lastQueryError = null;
+		this.notifyAll();
+		return true;
+	}
+
+	/** The pinned time-travel transaction, or `null` when viewing the latest state. */
+	getTimeTravelTx(): number | null {
+		return this.timeTravelTx;
+	}
+
+	/**
+	 * The diff between `tx - 1` and `tx` against the full snapshot database —
+	 * what the selected time-travel step added/retracted. Stores the result
+	 * (read back with {@link getLastTimeTravelDiff}) without notifying, so tab
+	 * renders can read it after `setTimeTravelTx` notified. Returns `null`
+	 * when no snapshot is loaded.
+	 */
+	getTimeTravelDiff(tx: number): DiffResult | null {
+		const db = this.fullDb ?? this.db;
+		if (db === null) {
+			this.lastTimeTravelDiff = null;
+			return null;
+		}
+
+		this.lastTimeTravelDiff = db.diff(Math.max(0, tx - 1), tx);
+		return this.lastTimeTravelDiff;
+	}
+
+	getLastTimeTravelDiff(): DiffResult | null {
+		return this.lastTimeTravelDiff;
 	}
 
 	/**

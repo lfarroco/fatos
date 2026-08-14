@@ -188,22 +188,29 @@ export { isFactSnapshot } from './snapshot';
 
 export type { TimelineEntry, FactFilter } from './transforms';
 export {
+	buildScopedSnapshot,
 	computeDiff,
 	computeTimeline,
+	factsAtOrBefore,
 	filterFacts,
 	formatValue,
 	groupFactsByEntity,
-	stableValueKey
+	stableValueKey,
+	transactionsAtOrBefore
 } from './transforms';
 
 export {
 	renderDiff,
 	renderEntityView,
 	renderFactTable,
+	renderGraphSvg,
 	renderNotice,
 	renderQueryResults,
 	renderTimeline
 } from './render';
+
+export { buildGraphModel, layoutGraph } from './graph';
+export type { GraphEdge, GraphLayout, GraphModel, GraphNode } from './graph';
 
 export { DevtoolsPanelController } from './controller';
 export type { DevtoolsRenderCallback, DevtoolsTabId } from './controller';

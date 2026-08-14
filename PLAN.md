@@ -425,10 +425,10 @@ packages/
 
 ### Phase 6: Advanced features
 
-- Time travel UI
-- Graph visualization
+- [x] Time travel UI
+- [x] Graph visualization
 - [x] Export/import functionality
-- Client-server sync strategies
+- [x] Client-server sync strategies
 
 ### Phase 7: Schema Designer (React-powered)
 

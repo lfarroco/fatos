@@ -15,6 +15,106 @@ Format:
 ```
 
 ---
+## [2026-08-14] devtools — Phase 6 time travel UI implemented
+- **Task**: Phase 6: Time travel UI (design/04 P4 "replay a tx range against a snapshot")
+- **Found by**: Phase 6 implementation (packages/devtools, packages/chrome-extension)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Added a Time Travel tab to the DevTools panel. New pure
+  helpers in devtools transforms: `factsAtOrBefore`,
+  `transactionsAtOrBefore`, `buildScopedSnapshot` (a point-in-time snapshot
+  that keeps the restore invariants, so `db.restore` accepts it).
+  `DevtoolsPanelController` gained `setTimeTravelTx(tx | null)`, which rebuilds
+  the client from a scoped snapshot — Facts/Entities/Query tabs all reflect the
+  pinned transaction — plus `getTimeTravelDiff(tx)` (the step diff against the
+  **full** log, `db.diff(tx-1, tx)`). Notable decisions/limitations:
+  - **The full snapshot db is kept separate from the scoped client db.** Diffs
+    always read the full log, so the Diff tab and the time-travel step diff
+    still see facts after the pinned tx even while the client is scoped.
+  - **`setTimeTravelTx` rebuilds the client via `db.restore`** (O(n) per pin)
+    instead of wrapping reads in `db.at(tx)`; this keeps every tab reading the
+    same scoped client with no per-read tx plumbing. Fine for inspector-size
+    datasets; a very large snapshot would make slider drags feel heavy.
+  - **Rebuilding on every slider `input` event is intentional** (live scrub);
+    the number input commits on `change` instead.
+  - `getTimeTravelDiff` stores without notifying (the tab reads it after
+    `setTimeTravelTx` notified), avoiding a render→diff→notify loop.
+- **Resolution**: devtools transforms.ts (+3 helpers), controller.ts
+  (time-travel state + methods + `getSchemas`), exports; chrome-extension
+  panel-ui.ts Time Travel tab (slider + number input + Latest + step diff) and
+  panel.html tab button. Tests: transforms.test.ts (+2 blocks),
+  controller.test.ts (+5). Validation: devtools build + typecheck + 74 tests
+  green; chrome-extension build + typecheck + 2 tests green.
+
+## [2026-08-14] devtools — Phase 6 graph visualization implemented
+- **Task**: Phase 6: Graph visualization
+- **Found by**: Phase 6 implementation (packages/devtools, packages/chrome-extension)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Added a Graph tab. New pure module `devtools/src/graph.ts`:
+  `buildGraphModel(facts, schemas?)` builds nodes (entities with facts; schema
+  entities with negative eids are skipped) and edges from ref-typed attribute
+  facts — branded `ref()` values whose target is a known entity id, or a plain
+  entity-id value on a ref schema attribute (`valueType: 'ref'` / `ref: true`).
+  Edges are labeled with the attribute name, deduplicated by (from, attribute,
+  to), and retracted refs are ignored. `layoutGraph` is a deterministic circle
+  layout (no force simulation, no new dependency); `renderGraphSvg` (render.ts)
+  draws straight-line edges + node circles as inline SVG, document-guarded.
+  Notable limitations:
+  - **Lookup-ref targets are dropped** (resolving them needs a database to find
+    the unique-attribute holder); only direct id refs become edges.
+  - **Ref targets without any facts are dropped** (no node to attach to).
+  - The graph reflects the time-travel scope when a tx is pinned (consistent
+    with the other tabs).
+- **Resolution**: graph.ts + graph.test.ts (8 tests), render.ts
+  `renderGraphSvg` (+1 render test), exports; chrome-extension panel-ui.ts
+  Graph tab + panel.html button. Validation: devtools build + typecheck + 74
+  tests green; chrome-extension build + typecheck + 2 tests green.
+
+## [2026-08-14] client + server — Phase 6 client-server sync strategies implemented
+- **Task**: Phase 6: Client-server sync strategies (docs/03 afterTx catch-up primitive)
+- **Found by**: Phase 6 implementation (packages/client, packages/server)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Implemented `createSyncingClient` (new `packages/client/src/
+  sync.ts`, exported from @fatos/client) and a server-side `sync` WS message
+  (the full-facts counterpart of the spec-scoped `subscribe` registry):
+  `{ type: 'sync', id, afterTx? }` → `synced` + `facts` (tx > afterTx) +
+  `transactions` (tx > afterTx) + live `sync-event` frames per committed
+  transaction. The live subscription is registered before the catch-up is
+  computed, and the whole exchange is synchronous, so no commit can fall into
+  the catch-up/live gap. Client strategies: full snapshot pull (first connect,
+  `db.restore`, client instance replaced) vs. `afterTx` incremental catch-up
+  (reconnect, per-tx `client.transact` on the same instance, watermark advanced
+  only on success) with a full-pull fallback after an incremental apply
+  failure. Documented in docs/sync-strategies.md. Notable decisions and
+  deviations:
+  - **Incremental replay converts schema facts back into schema declarations**
+    (`factsToTransactionEntries`): replaying stored schema facts through
+    `transact` is provably wrong (negative eids would be remapped as tempids —
+    the same reason core has `restore()`; see the Phase 5 issue below). The
+    conversion groups negative-eid `db/*` facts per schema entity and emits
+    `SchemaDeclaration`s first, then data mutations.
+  - **`restore` cannot be used for incremental catch-up** (empty-db only), so
+    the watermark must always track *server* tx numbers (local tx numbers after
+    `transact` replay differ; they are never used for sync bookkeeping).
+  - **Full-pull fallback swaps the client instance**; apps must re-bind to
+    `syncingClient.client` (`onClientReplaced` fires). A divergence escape
+    hatch, not a normal path.
+  - **Server protocol is an additive message type** (`sync`); the existing
+    spec-scoped `subscribe`/`afterTx` behavior and the raw fan-out are
+    untouched. `unsubscribe` now also disposes sync subscriptions; socket close
+    disposes both registries.
+  - **Transaction metadata is not value-tagged** on the wire (matches the
+    existing `/transactions` REST endpoint).
+  - **Text frames only**; non-string message data is ignored.
+- **Resolution**: client sync.ts (+15 tests incl. fake-socket flows:
+  full sync, live apply, afterTx reconnect, malformed frames, schema restore,
+  fallback rebuild), server `handleSync` + registries (+2 WS tests).
+  Validation: client build + typecheck + 33 tests green; server typecheck + 13
+  tests green; docs/sync-strategies.md added; PLAN.md Phase 6 ticked.
+
+
 
 ## [2026-08-14] schema-designer — Phase 7 relationship editing flow implemented
 - **Task**: Phase 7: Add relationship editing flow (one-to-one, one-to-many, many-to-many)

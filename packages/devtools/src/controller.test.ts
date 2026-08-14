@@ -178,4 +178,87 @@ describe('DevtoolsPanelController', () => {
 		expect(controller.importSnapshot(text)).toBe(true);
 		expect(controller.getFacts()).toEqual([[1, 'a', 'x', 1, 'add']]);
 	});
+
+	describe('time travel', () => {
+		it('rebuilds the client scoped to a transaction and back', () => {
+			const controller = new DevtoolsPanelController();
+			controller.setSnapshot(buildSnapshot());
+			expect(controller.getTimeTravelTx()).toBeNull();
+			expect(controller.getFacts()).toHaveLength(5);
+
+			expect(controller.setTimeTravelTx(2)).toBe(true);
+			expect(controller.getTimeTravelTx()).toBe(2);
+			// Facts 3-5 (tx 3..5) are excluded: [2, 'user/name', 'Bob'] and the age retract/add.
+			expect(controller.getFacts()).toEqual([
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[1, 'user/age', 30, 2, 'add']
+			]);
+			expect(controller.getTransactions()).toHaveLength(2);
+
+			// Queries run against the scoped client.
+			expect(controller.runQuery(nameQuery)).toEqual([[1, 'Alice']]);
+
+			// Back to the latest state.
+			expect(controller.setTimeTravelTx(null)).toBe(true);
+			expect(controller.getTimeTravelTx()).toBeNull();
+			expect(controller.getFacts()).toHaveLength(5);
+			expect(controller.runQuery(nameQuery)).toEqual([
+				[1, 'Alice'],
+				[2, 'Bob']
+			]);
+		});
+
+		it('rejects invalid transactions and missing snapshots', () => {
+			const controller = new DevtoolsPanelController();
+			expect(controller.setTimeTravelTx(2)).toBe(false);
+			expect(controller.getLastError()).toContain('no snapshot');
+
+			controller.setSnapshot(buildSnapshot());
+			expect(controller.setTimeTravelTx(0)).toBe(false);
+			expect(controller.getLastError()).toContain('invalid time-travel tx');
+		});
+
+		it('rejects out-of-range pins and clamps above the last tx', () => {
+			const controller = new DevtoolsPanelController();
+			controller.setSnapshot(buildSnapshot());
+			const before = controller.getFacts();
+
+			// Below tx 1 is rejected; the previous state is kept.
+			expect(controller.setTimeTravelTx(0)).toBe(false);
+			expect(controller.getLastError()).toContain('invalid time-travel tx');
+			expect(controller.getFacts()).toEqual(before);
+
+			// Above the last tx clamps to the full log.
+			controller.setTimeTravelTx(99);
+			expect(controller.getFacts()).toHaveLength(5);
+		});
+
+		it('computes the step diff against the full log even while scoped', () => {
+			const controller = new DevtoolsPanelController();
+			controller.setSnapshot(buildSnapshot());
+			controller.setTimeTravelTx(3);
+
+			// tx 4 retracts age 30; the scoped client cannot see tx 4, but the
+			// diff still reads the full snapshot db.
+			const diff = controller.getTimeTravelDiff(4);
+			expect(diff?.retracted.map((fact) => fact[2])).toContain(30);
+			expect(controller.getLastTimeTravelDiff()).toEqual(diff);
+
+			// The generic diff tab keeps working over the full log too.
+			const range = controller.getDiff(2, 5);
+			expect(range?.added.map((fact) => fact[2])).toContain(31);
+			expect(range?.retracted.map((fact) => fact[2])).toContain(30);
+		});
+
+		it('resets time travel when a new snapshot arrives', () => {
+			const controller = new DevtoolsPanelController();
+			controller.setSnapshot(buildSnapshot());
+			controller.setTimeTravelTx(2);
+			expect(controller.getTimeTravelTx()).toBe(2);
+
+			controller.setSnapshot(buildSnapshot());
+			expect(controller.getTimeTravelTx()).toBeNull();
+			expect(controller.getFacts()).toHaveLength(5);
+		});
+	});
 });

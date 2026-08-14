@@ -333,6 +333,26 @@ export function createClient(db?: FactDatabase): FatosClient {
 	return new FatosClient(db);
 }
 
+export {
+	SyncingClient,
+	applyDeltaToClient,
+	catchUpDelta,
+	createSyncingClient,
+	factsToTransactionEntries,
+	lastAppliedTx,
+	maxTxOf,
+	parseSyncMessage
+} from './sync';
+export type {
+	ApplyDeltaResult,
+	FactLog,
+	SyncServerMessage,
+	SyncSocket,
+	SyncStatus,
+	SyncTransactionEvent,
+	SyncingClientOptions
+} from './sync';
+
 export type {
 	EntityId,
 	Fact,
