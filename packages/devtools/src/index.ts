@@ -8,7 +8,12 @@
  * - Query console
  * - Timeline visualization
  * - Diff viewer
+ * - Page-side snapshot publisher (bridge producer)
  */
+
+import type { Fact, FatosClient } from '@fatos/client';
+import { serializeValue } from '@fatos/core';
+import type { FactSnapshot } from './snapshot';
 
 export const version = '0.0.1';
 
@@ -96,6 +101,85 @@ export function installInspectionRequestHandler(onInspectRequest: () => void): (
 	window.addEventListener('message', listener);
 	return () => {
 		window.removeEventListener('message', listener);
+	};
+}
+
+export type SnapshotPublisherOptions = {
+	/**
+	 * Publish the client's current state immediately after installing
+	 * (default `true`).
+	 */
+	publishInitial?: boolean;
+	/** Called with every snapshot right before it is published (e.g. logging). */
+	onSnapshot?: (snapshot: FactSnapshot) => void;
+};
+
+export type SnapshotPublisher = {
+	/** Builds and publishes a snapshot of the client's current state. */
+	publish(): FactSnapshot;
+	/** Stops listening for writes and inspect requests; safe to call twice. */
+	dispose(): void;
+};
+
+/** The inspected page URL, when running in a browser context. */
+function currentPageUrl(): string | undefined {
+	return typeof location === 'undefined' ? undefined : location.href;
+}
+
+/**
+ * Page-side snapshot producer (design/04 P4). Subscribes to client writes
+ * (`transaction:committed`) and to extension inspect requests, and publishes a
+ * `FactSnapshot` — facts + transactions from the client (values serialized to
+ * their JSON-wire form so symbol-branded refs survive `postMessage`/runtime
+ * messaging), plus `capturedAt`/`url` — through the browser devtools bridge.
+ *
+ * Returns a handle with `publish()` for on-demand re-publishing and `dispose()`
+ * to tear the subscriptions down. Guards for no-window environments (Node
+ * tests, SSR): install, publish, and dispose all no-op without a window.
+ */
+export function installSnapshotPublisher(
+	client: FatosClient,
+	options: SnapshotPublisherOptions = {}
+): SnapshotPublisher {
+	const bridge = createBrowserDevtoolsBridge();
+	const { publishInitial = true, onSnapshot } = options;
+	let disposed = false;
+
+	const buildSnapshot = (): FactSnapshot => ({
+		facts: client.getFacts().map(
+			(fact) => [fact[0], fact[1], serializeValue(fact[2]), fact[3], fact[4]] as Fact
+		),
+		transactions: [...client.getTransactions()],
+		capturedAt: Date.now(),
+		url: currentPageUrl()
+	});
+
+	const publish = (): FactSnapshot => {
+		const snapshot = buildSnapshot();
+		if (!disposed) {
+			onSnapshot?.(snapshot);
+			bridge.publishSnapshot(snapshot);
+		}
+		return snapshot;
+	};
+
+	const unsubscribe = client.subscribe(publish);
+	const stopInspectionHandler = installInspectionRequestHandler(publish);
+
+	if (publishInitial) {
+		publish();
+	}
+
+	return {
+		publish,
+		dispose(): void {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+			unsubscribe();
+			stopInspectionHandler();
+		}
 	};
 }
 

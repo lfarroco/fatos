@@ -5,7 +5,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"build": "tsup src/cli.ts --format esm --dts --sourcemap",
+		"build": "tsup src/cli.ts --format esm --dts --sourcemap && tsup --config tsup.harness.config.ts",
 		"dev": "tsup src/cli.ts --format esm --dts --sourcemap --watch",
 		"start": "node dist/cli.js",
 		"example": "vite-node src/cli.ts",
@@ -32,6 +32,7 @@
 	"dependencies": {
 		"@fatos/client": "file:../client",
 		"@fatos/core": "file:../core",
+		"@fatos/devtools": "file:../devtools",
 		"@fatos/react": "file:../react",
 		"@fatos/schema-designer": "file:../schema-designer",
 		"@fatos/server": "file:../server",

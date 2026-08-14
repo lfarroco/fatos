@@ -61,7 +61,7 @@ Format:
   query console) — docs/design/04-phasing.md P4
 - **Found by**: P4 inspector implementation (packages/devtools, packages/chrome-extension)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: The panel now validates bridge snapshot payloads against the
   `FactSnapshot` contract defined in packages/devtools/src/snapshot.ts
   (`{ facts, transactions, capturedAt?, url? }`, values may be engine values
@@ -77,8 +77,26 @@ Format:
   every committed transaction). Note: `@fatos/client` re-exports neither
   `createDatabase` nor `deserializeValue`, so @fatos/devtools takes a direct
   `@fatos/core` dependency for the controller's restore/replay path.
-- **Resolution**: pending; the controller + panel degrade gracefully in the
-  meantime (validated: devtools 35 tests, chrome-extension 2 tests).
+- **Resolution**: landed the page-side producer —
+  `installSnapshotPublisher(client, options?)` in packages/devtools (exported
+  from the index) subscribes to `transaction:committed` writes and to the
+  extension's `inspect-request` handler, builds a `FactSnapshot` (facts +
+  transactions from the client, `capturedAt`, `url`), and publishes it via
+  `createBrowserDevtoolsBridge().publishSnapshot(...)`. Values are serialized
+  with `serializeValue` to their JSON-wire form first, so symbol-branded refs
+  survive `postMessage`/`chrome.runtime.sendMessage` and the panel's
+  `deserializeValue` replay is exact. Returns `{ publish(), dispose() }`;
+  guards for no-window environments (install/publish/dispose all no-op).
+  Verified `content.ts` already relays snapshot payloads verbatim (kind
+  `snapshot` passes `isPageBridgeMessage` and is forwarded as-is), so no
+  content/background changes were needed. Examples gained a self-contained
+  browser harness (`examples/browser-harness.html` + `src/browser-harness.ts`,
+  bundled to `dist/browser-harness.js` with `--no-external`) that seeds a demo
+  client, installs the publisher, and offers add/toggle/transact/publish
+  buttons so the panel shows live changes; README documents how to serve it.
+  Validation: devtools build/typecheck green, devtools 40 tests (was 35),
+  chrome-extension typecheck + 2 tests green, examples typecheck green + 11
+  tests green.
 
 ## [2026-08-14] core — P1 transact & query surface (design/02) implemented
 - **Task**: P1 transact & query surface (docs/design/02-transact-and-query.md, docs/design/04-phasing.md P1)

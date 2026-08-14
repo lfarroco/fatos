@@ -20,6 +20,7 @@ that runs is also an example that is verified.
 | `react` | `src/react-example.tsx` | React integration: `FatosProvider` plus `useQuery`, `useEntity`, `useDatalogQuery`, `useTransaction`, `useFatosClient` in a small todo app |
 | `schema-designer` | `src/schema-designer.ts` | Schema designer documents: editor helpers, import/export validation, conversion to Fatos transactions, and Fatos snapshot round-trips |
 | `full-stack` | `src/full-stack-app.ts` | An end-to-end app: two clients share one server — REST writes, live WebSocket sync, and time-travel reads over HTTP |
+| `browser-harness` | `src/browser-harness.ts` + `browser-harness.html` | A browser page that publishes live `FactSnapshot`s to the Fatos DevTools panel: seed a demo client, then add/retract/transact and watch the panel update |
 
 `src/index.ts` exports `runAll()`, which runs every example back to back.
 `src/cli.ts` is the CLI entry point used by the `example:*` scripts and the
@@ -57,6 +58,36 @@ If you are inside `packages/examples`, drop the `--workspace` flag:
 ```bash
 npm run example:react
 ```
+
+## DevTools browser harness
+
+`browser-harness.html` is a standalone demo page that publishes live
+`FactSnapshot`s to the Fatos DevTools panel (the page-side half of the
+devtools bridge). It is the missing producer the panel needs: without it the
+panel degrades to "waiting for snapshot".
+
+Build it (this also bundles `@fatos/client`/`@fatos/core`/`@fatos/devtools`
+into the self-contained `dist/browser-harness.global.js`, so no bundler or
+server dependencies are needed):
+
+```bash
+npm run build
+```
+
+Then serve `packages/examples` over HTTP (the extension content script only
+runs on http/https pages), e.g.:
+
+```bash
+npx serve .
+# or: python3 -m http.server 8080
+```
+
+Open `http://localhost:8080/browser-harness.html` in Chrome with the Fatos
+DevTools extension installed, and open DevTools → the **Fatos** panel. The
+page seeds a demo client and re-publishes a full snapshot on every write
+(plus an initial snapshot on load); the panel's **Inspect** button requests
+one on demand. Use the page's buttons to add facts, toggle a value, or
+transact an order status update and watch the Facts/Timeline/Diff tabs change.
 
 ## Tests
 

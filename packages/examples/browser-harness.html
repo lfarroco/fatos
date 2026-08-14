@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fatos — browser harness</title>
+<style>
+	:root {
+		color-scheme: light;
+	}
+
+	body {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		background: #f8fafc;
+		color: #0f172a;
+		margin: 0;
+		padding: 32px;
+	}
+
+	h1 {
+		font-size: 18px;
+		margin: 0 0 8px;
+	}
+
+	p {
+		font-size: 12px;
+		color: #475569;
+		margin: 0 0 20px;
+		line-height: 1.6;
+		max-width: 680px;
+	}
+
+	code {
+		background: #e2e8f0;
+		border-radius: 4px;
+		padding: 1px 4px;
+	}
+</style>
+</head>
+<body>
+<main>
+	<h1>Fatos browser harness</h1>
+	<p>
+		Demo page that publishes live <code>FactSnapshot</code>s to the Fatos DevTools
+		panel. With this page as the inspected tab, open DevTools → the
+		<strong>Fatos</strong> panel: every write below is re-published immediately, and
+		the panel's <strong>Inspect</strong> button requests a fresh snapshot on demand.
+	</p>
+	<div id="fatos-browser-harness"></div>
+</main>
+<script src="./dist/browser-harness.global.js"></script>
+</body>
+</html>
