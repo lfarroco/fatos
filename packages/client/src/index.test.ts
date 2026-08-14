@@ -2,7 +2,7 @@
  * Browser client tests
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
 	createClient,
 	version,
@@ -13,6 +13,7 @@ import {
 	TRANSACTION_COMMITTED_EVENT,
 	type EntityState,
 	type Fact,
+	type FatosClient,
 	type QueryTerm,
 	type TransactionRecord
 } from './index';
@@ -226,6 +227,25 @@ describe('@fatos/client — EventTarget reactivity (P2)', () => {
 });
 
 describe('@fatos/client — live queries (P2)', () => {
+	it('passes the client as the first argument to the live() selector', () => {
+		const client = createClient();
+		client.add(1, 'type', 'user');
+
+		const fn = vi.fn((c: FatosClient) => c.find({ type: 'user' }).map((user) => user.id));
+		const live = client.live(fn);
+		expect(live.current).toEqual([1]);
+		expect(fn).toHaveBeenCalledTimes(1);
+		expect(fn).toHaveBeenCalledWith(client);
+
+		// Re-evaluations on relevant writes receive the client too.
+		client.add(2, 'type', 'user');
+		expect(fn).toHaveBeenCalledTimes(2);
+		expect(fn).toHaveBeenLastCalledWith(client);
+		expect(live.current).toEqual([1, 2]);
+
+		live.dispose();
+	});
+
 	it('delegates live() criteria form to the core database', () => {
 		const client = createClient();
 		const live = client.live({ type: 'user' });

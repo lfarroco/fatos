@@ -2165,21 +2165,22 @@ export class FactDatabase {
 	/**
 	 * Live query (design/03). Three forms:
 	 *
-	 * - `live(fn)` — access tracking: while `fn` runs, entity attribute reads
-	 *   (plus `find` criteria / `query` where attributes) are recorded via
-	 *   proxies, and the recorded set narrows the subscription key through the
-	 *   AEVT index. Writes touching only unrelated attributes do not re-run
-	 *   `fn`; the result is memoized and diffed so subscribers are notified
-	 *   only on actual change.
+	 * - `live(fn)` — access tracking: `fn` receives the database as its first
+	 *   argument (`db.live(db => db.find(...))`, design/03) and while it runs,
+	 *   entity attribute reads (plus `find` criteria / `query` where
+	 *   attributes) are recorded via proxies, and the recorded set narrows the
+	 *   subscription key through the AEVT index. Writes touching only
+	 *   unrelated attributes do not re-run `fn`; the result is memoized and
+	 *   diffed so subscribers are notified only on actual change.
 	 * - `live(deps, fn)` — explicit-dependency variant, no Proxy.
 	 * - `live(specOrCriteria)` — direct QuerySpec / find-criteria form.
 	 */
-	live<T>(fn: () => T): LiveResult<T>;
+	live<T>(fn: (db: FactDatabase) => T): LiveResult<T>;
 	live<T>(deps: readonly string[], fn: () => T): LiveResult<T>;
 	live(spec: QuerySpec): LiveResult<QueryTerm[][]>;
 	live(criteria: Record<string, unknown>): LiveResult<EntityState[]>;
 	live<T>(
-		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		input: ((db: FactDatabase) => T) | readonly string[] | QuerySpec | Record<string, unknown>,
 		fn?: () => T
 	): LiveResult<T> | LiveResult<QueryTerm[][]> | LiveResult<EntityState[]> {
 		return this.createLiveResult(this.buildLiveHandle(input, fn));
@@ -2720,11 +2721,13 @@ export class FactDatabase {
 
 	/** Dispatches a `live`/`liveQuery` input to a LiveHandle with an initial evaluation. */
 	private buildLiveHandle<T>(
-		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		input: ((db: FactDatabase) => T) | readonly string[] | QuerySpec | Record<string, unknown>,
 		fn?: () => T
 	): LiveHandle<T> {
 		if (typeof input === 'function') {
-			return this.createLiveHandle(input, true, null);
+			// Access-tracking form: the selector receives the database (design/03);
+			// existing no-arg selectors ignore the extra argument.
+			return this.createLiveHandle(() => input(this), true, null);
 		}
 
 		if (isStringArray(input)) {
@@ -2852,27 +2855,51 @@ export class FactDatabase {
 			},
 			subscribe: (callback: (value: T) => void): (() => void) => liveResult.subscribe(callback),
 			dispose,
-			async *[Symbol.asyncIterator](): AsyncGenerator<T> {
-				try {
-					if (disposed) {
-						return;
-					}
-					// Changes that arrived before iteration started are already
-					// reflected in `current`; drop the buffered duplicates.
-					queue.length = 0;
-					yield handle.memoValue as T;
-					while (!disposed) {
-						if (queue.length > 0) {
-							yield queue.shift() as T;
-						} else {
-							await new Promise<void>((resolve) => {
-								resolveNext = resolve;
-							});
+			// The generator idles on a never-settling `await new Promise(...)`
+			// when no change is queued. Per V8 async-generator semantics a
+			// `return()`/`throw()` issued while suspended there would not settle
+			// until the pending await resolves (i.e. the next notification or
+			// dispose()) — hanging indefinitely. The wrapper therefore disposes
+			// first — resolving any pending idle await and flipping `disposed`
+			// so the loop exits on wake — then delegates to the real generator,
+			// whose `finally` runs and lets the return/throw complete.
+			[Symbol.asyncIterator](): AsyncIterator<T> {
+				const generator = (async function* (): AsyncGenerator<T> {
+					try {
+						if (disposed) {
+							return;
 						}
+						// Changes that arrived before iteration started are already
+						// reflected in `current`; drop the buffered duplicates.
+						queue.length = 0;
+						yield handle.memoValue as T;
+						while (!disposed) {
+							if (queue.length > 0) {
+								yield queue.shift() as T;
+							} else {
+								await new Promise<void>((resolve) => {
+									resolveNext = resolve;
+								});
+							}
+						}
+					} finally {
+						dispose();
 					}
-				} finally {
-					dispose();
-				}
+				})();
+
+				const wrapped = {
+					next: (value?: unknown) => generator.next(value),
+					return: (value?: unknown): Promise<IteratorResult<T>> => {
+						dispose();
+						return generator.return(value);
+					},
+					throw: (error?: unknown): Promise<IteratorResult<T>> => {
+						dispose();
+						return generator.throw(error);
+					},
+					[Symbol.asyncIterator]: () => wrapped
+				};
+				return wrapped;
 			}
 		};
 	}

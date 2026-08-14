@@ -419,9 +419,9 @@ packages/
 
 ### Phase 5: Persistence
 
-- PostgreSQL adapter
-- IndexedDB adapter (client)
-- Query optimization for large datasets
+- [x] PostgreSQL adapter
+- [x] IndexedDB adapter (client)
+- [x] Query optimization for large datasets
 
 ### Phase 6: Advanced features
 

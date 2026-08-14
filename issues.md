@@ -535,7 +535,7 @@ back to sub-agents for fixes.
 - **Task**: P2 React half (selector hooks + memoized snapshots, packages/react only)
 - **Found by**: P2 React implementation (packages/react)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: `docs/design/03-reactivity-and-wire.md` shows the access-tracking
   form as `db.live(db => db.find(...))` — the selector receives the database as
   an argument — but the implemented core `live(fn)` (packages/core) stores `fn`
@@ -549,14 +549,25 @@ back to sub-agents for fixes.
   `live(fn)` users. Options for later: pass the db into `fn` (breaking change to
   the no-arg type), or update the design doc + React hook signature to a
   no-arg selector.
-- **Resolution**: react hook implemented with the client supplied from context;
-  core/client untouched in this run.
+- **Resolution**: core `live(fn)` and client `live(fn)` now evaluate the
+  selector with the database/client as the first argument
+  (`db.live(db => db.find(...))`, design/03). Overload types updated to
+  `live<T>(fn: (db: FactDatabase) => T)` / `live<T>(fn: (client: FatosClient) => T)`;
+  the core access-tracking form evaluates `fn(this)` and the client form
+  evaluates `fn(client)` (delegating the tracked reads to the underlying db).
+  Non-breaking: existing no-arg selectors ignore the extra argument. The React
+  hook is unchanged (`client.live(() => selector(client))` — behavior
+  identical; comment updated). New tests assert the selector receives the
+  db/client on first evaluation and on re-runs after relevant writes (core
+  live.test.ts +1, client index.test.ts +1). Validation: core and client
+  build/typecheck/tests green (core 214, client 34); react, server, devtools,
+  examples typecheck green.
 
 ## [2026-08-14] react — tests use react-test-renderer (deprecated) pinned to React 18 types
 - **Task**: P2 React half (tests, packages/react only)
 - **Found by**: P2 React implementation (packages/react)
 - **Severity**: low
-- **Status**: open
+- **Status**: fixed (documented decision — deferred, see Resolution)
 - **Description**: The vitest environment is `node` (root vitest.config) with no
   jsdom/happy-dom and no DOM shim in the repo, and `react-dom/client` needs a
   DOM. The P2 hook tests therefore use `react-test-renderer` (new devDependency,
@@ -566,7 +577,13 @@ back to sub-agents for fixes.
   pinned to `18.3.1`. When the repo upgrades to React 19, swap the tests to
   `react-dom/client` + a DOM environment or @testing-library.
 - **Resolution**: devDeps added to packages/react only (`react-test-renderer@^18.3.1`,
-  `@types/react-test-renderer@^18.3.1`); package-lock.json updated.
+  `@types/react-test-renderer@^18.3.1`); package-lock.json updated. Decision
+  (2026-08-14 follow-up, documented only — no code change): the repo is on
+  React 18, where react-test-renderer is deprecated but functional and the
+  18.x-pinned types are the correct pairing; the deprecation is **deferred
+  until a React 19 upgrade**. No action is warranted before that upgrade, at
+  which point the tests move to `react-dom/client` + a DOM environment or
+  @testing-library as noted above.
 
 ## [2026-08-14] core+server — P3 wire protocol implemented (JSON tags, /query, WS subscribe)
 - **Task**: P3 wire & hygiene (docs/design/03-reactivity-and-wire.md "Wire protocol", docs/design/04-phasing.md P3)
@@ -616,7 +633,7 @@ back to sub-agents for fixes.
 - **Task**: live.test.ts restructure (describe-inside-it fix)
 - **Found by**: live.test.ts restructure validation
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: In `createLiveQueryResult` (packages/core/src/index.ts) the
   async generator idles on `await new Promise((resolve) => { resolveNext =
   resolve; })` when no change is queued. Per V8 async-generator semantics, a
@@ -633,7 +650,18 @@ back to sub-agents for fixes.
   (e.g. wrap the iterator with an explicit `return()` that triggers the
   pending resolution, or resolve the idle await on a disposal flag), or
   document that consumers must call `dispose()` rather than `return()`.
-- **Resolution**: none (documented; tests avoid the path for now).
+- **Resolution**: `createLiveQueryResult` now wraps the async generator in an
+  explicit iterator whose `return()`/`throw()` call `dispose()` first —
+  resolving any pending idle `resolveNext` and flipping `disposed` so the
+  generator's loop exits on wake — then delegate to the real generator so its
+  `finally` runs and the return/throw completes. Verified with a standalone
+  V8 repro: `return()`/`throw()` issued while idle-pending settle in 0 ms
+  (previously hung indefinitely; the generator's `finally` never ran). New
+  test in live.test.ts: start liveQuery, get the initial yield, leave a
+  `next()` in flight (generator idle-pending), `Promise.race` an
+  `iterator.return()` against a 1 s timeout and assert it settles 'returned';
+  the abandoned `next()` and later reads complete as done. Validation: core
+  build/typecheck green; live.test.ts 19/19; full core suite 214 tests green.
 
 ## [2026-08-14] persistence — Phase 5 storage adapters + server wiring (design/04)
 - **Task**: Phase 5 persistence (PLAN.md Phase 5; docs/design/04-phasing.md P0 "Cross-package import cleanup" follow-through: @fatos/persistence was a stub package)

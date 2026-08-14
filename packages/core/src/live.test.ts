@@ -5,9 +5,28 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createDatabase } from './index';
+import { createDatabase, type FactDatabase } from './index';
 
 describe('db.live — access tracking', () => {
+	it('passes the database as the first argument to the selector', () => {
+		const db = createDatabase();
+		db.add(1, 'user/role', 'admin');
+
+		const fn = vi.fn((d: FactDatabase) => d.find({ 'user/role': 'admin' }).map((user) => user.id));
+		const live = db.live(fn);
+		expect(live.current).toEqual([1]);
+		expect(fn).toHaveBeenCalledTimes(1);
+		expect(fn).toHaveBeenCalledWith(db);
+
+		// Re-evaluations on relevant writes receive the database too.
+		db.add(2, 'user/role', 'admin');
+		expect(fn).toHaveBeenCalledTimes(2);
+		expect(fn).toHaveBeenLastCalledWith(db);
+		expect(live.current).toEqual([1, 2]);
+
+		live.dispose();
+	});
+
 	it('does not re-run fn when writes touch unrelated attributes', () => {
 		const db = createDatabase();
 		db.add(1, 'user/role', 'admin');
@@ -285,6 +304,36 @@ describe('db.liveQuery', () => {
 		query.dispose();
 		const after = await iterator.next();
 		expect(after.done).toBe(true);
+	});
+
+	it('iterator.return() settles while the stream is idle-pending (no hang)', async () => {
+		const db = createDatabase();
+		db.add(1, 'user/role', 'admin');
+
+		const query = db.liveQuery({ 'user/role': 'admin' });
+		const iterator = query[Symbol.asyncIterator]();
+
+		const first = await iterator.next();
+		expect(first.done).toBe(false);
+		expect(first.value).toEqual([{ id: 1, 'user/role': 'admin' }]);
+
+		// Leave a next() unanswered: the generator suspends on its internal
+		// idle await. A return() issued now used to hang until the next
+		// notification or dispose(); it must settle instead.
+		const pendingNext = iterator.next();
+		const settled = await Promise.race([
+			iterator.return().then(() => 'returned' as const),
+			new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1000))
+		]);
+		expect(settled).toBe('returned');
+
+		// The generator's finally disposed the handle: the abandoned next()
+		// and any later reads complete as done.
+		expect((await pendingNext).done).toBe(true);
+		expect((await iterator.next()).done).toBe(true);
+		expect(query.current).toEqual([{ id: 1, 'user/role': 'admin' }]);
+
+		query.dispose();
 	});
 
 	it('works with for-await and disposes via query.dispose()', async () => {

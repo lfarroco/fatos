@@ -211,20 +211,23 @@ export class FatosClient extends EventTarget {
 	/**
 	 * Live query (design/03), delegated to the underlying core database:
 	 * memoized `current` result plus change subscription. Three forms —
-	 * `live(fn)` access tracking, `live(deps, fn)` explicit dependencies, and
+	 * `live(fn)` access tracking (the selector receives the client as its
+	 * first argument), `live(deps, fn)` explicit dependencies, and
 	 * `live(specOrCriteria)` direct QuerySpec / find-criteria form.
 	 */
-	live<T>(fn: () => T): LiveResult<T>;
+	live<T>(fn: (client: FatosClient) => T): LiveResult<T>;
 	live<T>(deps: readonly string[], fn: () => T): LiveResult<T>;
 	live(spec: QuerySpec): LiveResult<QueryTerm[][]>;
 	live(criteria: Record<string, unknown>): LiveResult<EntityState[]>;
 	live<T>(
-		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		input: ((client: FatosClient) => T) | readonly string[] | QuerySpec | Record<string, unknown>,
 		fn?: () => T
 	): LiveResult<T> | LiveResult<QueryTerm[][]> | LiveResult<EntityState[]> {
 		// Delegate per form so the core overloads resolve unambiguously.
 		if (typeof input === 'function') {
-			return this.db.live(input);
+			// Access-tracking form: pass the client through (design/03); the
+			// core tracker records the delegated db reads underneath.
+			return this.db.live(() => input(this));
 		}
 
 		if (isStringArray(input)) {

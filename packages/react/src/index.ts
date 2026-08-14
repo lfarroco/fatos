@@ -103,8 +103,9 @@ function useQuerySelector<T>(selector: (db: FatosClient) => T): T {
 	// Hold the latest selector so inline closures see fresh props, while the
 	// live handle itself is created once per mount — otherwise a new inline
 	// selector identity per render would recreate the handle and defeat the
-	// memoized-snapshot bail-out. The core `live(fn)` form calls `fn` without
-	// arguments, so the hook supplies the client from context itself.
+	// memoized-snapshot bail-out. `client.live(fn)` already supplies the
+	// client as the selector's first argument, so the ref-indirected closure
+	// can simply forward it.
 	const selectorRef = useRef(selector);
 	selectorRef.current = selector;
 
