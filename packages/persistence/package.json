@@ -21,6 +21,14 @@
 		"./file": {
 			"types": "./dist/adapters/file.d.ts",
 			"import": "./dist/adapters/file.js"
+		},
+		"./indexeddb": {
+			"types": "./dist/adapters/indexeddb.d.ts",
+			"import": "./dist/adapters/indexeddb.js"
+		},
+		"./memory": {
+			"types": "./dist/adapters/memory.d.ts",
+			"import": "./dist/adapters/memory.js"
 		}
 	},
 	"files": [

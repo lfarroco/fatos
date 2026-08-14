@@ -5,6 +5,8 @@
 import { describe, it, expect } from 'vitest';
 import WebSocket from 'ws';
 import { createFatosServer, version } from './index';
+import type { StorageAdapter } from '@fatos/persistence';
+import { MemoryAdapter } from '@fatos/persistence';
 import { deserializeValue, isRef, REF_BRAND } from '@fatos/core';
 
 /** Polls `messages` until `predicate` matches one of them or the timeout hits. */
@@ -516,6 +518,81 @@ describe('@fatos/server', () => {
 			).toHaveLength(1);
 		} finally {
 			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('seeds from a storage adapter and persists every transaction across restarts', async () => {
+		const storage = new MemoryAdapter();
+
+		const first = createFatosServer({ storage });
+		const firstAddress = await first.start({ port: 0 });
+		try {
+			first.transact(
+				[
+					['add', 1, 'type', 'user'],
+					['add', 1, 'name', 'Alice']
+				],
+				{ source: 'persistence' }
+			);
+			await first.flush();
+		} finally {
+			await first.stop();
+		}
+
+		// A brand-new server seeded from the same adapter must see everything.
+		const second = createFatosServer({ storage });
+		const secondAddress = await second.start({ port: 0 });
+		const baseUrl = `http://${secondAddress.host}:${secondAddress.port}`;
+		try {
+			const factsResponse = await fetch(`${baseUrl}/facts`);
+			const factsBody = (await factsResponse.json()) as { facts: unknown[] };
+			expect(factsBody.facts).toEqual([
+				[1, 'type', 'user', 1, 'add'],
+				[1, 'name', 'Alice', 1, 'add']
+			]);
+
+			const txResponse = await fetch(`${baseUrl}/transactions`);
+			const txBody = (await txResponse.json()) as {
+				transactions: [number, number, Record<string, unknown> | null][];
+			};
+			expect(txBody.transactions).toHaveLength(1);
+			expect(txBody.transactions[0][0]).toBe(1);
+			expect(txBody.transactions[0][1]).toEqual(expect.any(Number));
+			expect(txBody.transactions[0][2]).toEqual({ source: 'persistence' });
+
+			// Tx numbering stays consistent after restore: the next commit is tx 2.
+			second.transact([['add', 2, 'type', 'admin']]);
+			await second.flush();
+
+			const factsAfter = (await (await fetch(`${baseUrl}/facts`)).json()) as { facts: unknown[] };
+			expect(factsAfter.facts).toEqual([
+				[1, 'type', 'user', 1, 'add'],
+				[1, 'name', 'Alice', 1, 'add'],
+				[2, 'type', 'admin', 2, 'add']
+			]);
+		} finally {
+			await second.stop();
+		}
+	});
+
+	it('surfaces storage save failures on flush()', async () => {
+		const failing: StorageAdapter = {
+			async load() {
+				return { facts: [], transactions: [] };
+			},
+			async save() {
+				throw new Error('disk full');
+			},
+			async close() {}
+		};
+
+		const server = createFatosServer({ storage: failing });
+		await server.start({ port: 0 });
+		try {
+			server.transact([['add', 1, 'type', 'user']]);
+			await expect(server.flush()).rejects.toThrow(/disk full/);
+		} finally {
 			await server.stop();
 		}
 	});

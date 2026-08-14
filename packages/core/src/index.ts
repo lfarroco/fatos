@@ -52,6 +52,16 @@ export type TransactionRecord = readonly [
 	metadata: Record<string, unknown> | null
 ];
 
+/**
+ * A point-in-time snapshot of a database: the full append-only fact log plus
+ * the transaction ledger (design/04 persistence). `restore()` consumes it to
+ * rebuild a database that behaves identically to the one that saved it.
+ */
+export type DatabaseSnapshot = {
+	facts: readonly Fact[];
+	transactions: readonly TransactionRecord[];
+};
+
 /** Entity id position that accepts tempids (negative numbers and temp() handles). */
 export type InputEid = EntityId | TempHandle;
 
@@ -956,6 +966,52 @@ function livePairKey(eid: EntityId, attribute: string): string {
 	return `${typeof eid}:${String(eid)}\u0000${attribute}`;
 }
 
+/**
+ * Validates a snapshot's ordering invariants before restore: facts must be
+ * ordered by ascending tx, transaction records must be strictly ascending, and
+ * the two tx sets must match exactly (every transaction has facts, every fact
+ * belongs to a recorded transaction).
+ */
+function validateSnapshotOrder(facts: readonly Fact[], transactions: readonly TransactionRecord[]): void {
+	let previousTx = 0;
+	const factTxs = new Set<number>();
+	for (const fact of facts) {
+		const tx = fact[3];
+		if (!Number.isInteger(tx) || tx < 1) {
+			throw new Error(`restore(): fact tx must be a positive integer, got ${String(tx)}`);
+		}
+		if (tx < previousTx) {
+			throw new Error('restore(): facts must be ordered by ascending tx');
+		}
+		previousTx = tx;
+		factTxs.add(tx);
+	}
+
+	let expectedTx = 0;
+	const transactionTxs = new Set<number>();
+	for (const [tx] of transactions) {
+		if (!Number.isInteger(tx) || tx < 1) {
+			throw new Error(`restore(): transaction tx must be a positive integer, got ${String(tx)}`);
+		}
+		if (tx <= expectedTx) {
+			throw new Error('restore(): transactions must be ordered by strictly ascending tx');
+		}
+		expectedTx = tx;
+		transactionTxs.add(tx);
+	}
+
+	for (const tx of factTxs) {
+		if (!transactionTxs.has(tx)) {
+			throw new Error(`restore(): fact references tx ${tx} with no matching transaction record`);
+		}
+	}
+	for (const tx of transactionTxs) {
+		if (!factTxs.has(tx)) {
+			throw new Error(`restore(): transaction ${tx} has no facts`);
+		}
+	}
+}
+
 export class FactDatabase {
 	private facts: Fact[] = [];
 	private transactions: TransactionRecord[] = [];
@@ -1611,6 +1667,54 @@ export class FactDatabase {
 
 	getTransactions(): readonly TransactionRecord[] {
 		return this.transactions.slice();
+	}
+
+	/**
+	 * Restores a previously persisted snapshot (design/04 persistence): the fact
+	 * log and transaction ledger are replayed verbatim, preserving tx numbering,
+	 * schema state (negative schema eids are kept — they are never tempids), and
+	 * index contents, so a restored database behaves identically to the one that
+	 * saved the snapshot. Only callable on a fresh database (no facts or
+	 * transactions yet); throws otherwise.
+	 */
+	restore(snapshot: DatabaseSnapshot): void {
+		if (this.facts.length > 0 || this.transactions.length > 0) {
+			throw new Error('restore() can only be called on an empty database');
+		}
+
+		const { facts, transactions } = snapshot;
+		validateSnapshotOrder(facts, transactions);
+
+		for (const transaction of transactions) {
+			this.transactions.push(transaction);
+		}
+
+		let maxTx = 0;
+		let minSchemaEid = 0;
+		let maxEntityEid = 0;
+		for (const fact of facts) {
+			const [eid, attribute, value, tx, op] = fact;
+			if (tx > maxTx) {
+				maxTx = tx;
+			}
+			if (typeof eid === 'number' && eid < minSchemaEid) {
+				minSchemaEid = eid;
+			}
+			if (typeof eid === 'number' && eid > maxEntityEid) {
+				maxEntityEid = eid;
+			}
+
+			this.appendFact(tx, op, eid, attribute, value);
+			this.onFactCommitted(fact);
+		}
+
+		this.nextTx = maxTx + 1;
+		this.nextSchemaEid = minSchemaEid - 1;
+		this.nextEntityEid = maxEntityEid + 1;
+		// `db/unique` schema facts and value facts can interleave arbitrarily in
+		// the log; rather than trusting the incremental replay order, drop the
+		// unique index so it rebuilds lazily from the AEVT index on the next write.
+		this.uniqueIndex.clear();
 	}
 
 	getSchema(ident: string): SchemaInfo | null {

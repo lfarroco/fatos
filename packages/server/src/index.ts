@@ -12,6 +12,7 @@
 
 import { createServer, type IncomingMessage, type Server as NodeServer, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
+import type { StorageAdapter } from '@fatos/persistence';
 import {
 	createDatabase,
 	deserializeQuerySpec,
@@ -44,6 +45,16 @@ export type ServerEvent =
 export type StartOptions = {
 	port?: number;
 	host?: string;
+};
+
+/**
+ * Construction options for {@link FatosServer}. When `storage` is provided the
+ * server seeds its database from the adapter on `start()` and persists the
+ * snapshot after every successful transaction; without it the server keeps its
+ * existing in-memory-only behavior.
+ */
+export type FatosServerOptions = {
+	storage?: StorageAdapter;
 };
 
 export type ServerAddress = {
@@ -155,6 +166,13 @@ function deserializeEntry(entry: unknown): unknown {
 
 export class FatosServer {
 	private db = createDatabase();
+	private readonly storage: StorageAdapter | null;
+	/** True once the storage snapshot has been restored into the in-memory db. */
+	private seeded = false;
+	/** Serialized persistence pipeline: saves run in commit order, never overlapping. */
+	private persistQueue: Promise<void> = Promise.resolve();
+	/** First storage-save failure since the last `flush()`, surfaced by `flush()`. */
+	private lastPersistError: Error | null = null;
 	private server: NodeServer | null = null;
 	private listeners = new Set<(event: ServerEvent) => void>();
 	private websocketServer: WebSocketServer | null = null;
@@ -162,9 +180,21 @@ export class FatosServer {
 	/** Per-client subscribe registry: subscription id -> live handle (design/03). */
 	private clientSubscriptions = new Map<WebSocket, Map<string, ClientSubscription>>();
 
-	start(options: StartOptions = {}): Promise<ServerAddress> {
+	constructor(options: FatosServerOptions = {}) {
+		this.storage = options.storage ?? null;
+	}
+
+	async start(options: StartOptions = {}): Promise<ServerAddress> {
 		if (this.server) {
-			return Promise.resolve(this.getAddress());
+			return this.getAddress();
+		}
+
+		// Seed once per server instance: the in-memory db survives start/stop
+		// cycles, so re-running restore() on a non-empty db would throw.
+		if (this.storage && !this.seeded) {
+			const snapshot = await this.storage.load();
+			this.db.restore(snapshot);
+			this.seeded = true;
 		}
 
 		const host = options.host ?? '127.0.0.1';
@@ -217,7 +247,12 @@ export class FatosServer {
 		});
 	}
 
-	stop(): Promise<void> {
+	async stop(): Promise<void> {
+		// Wait for any in-flight storage save so a stopped server has a
+		// consistent snapshot on disk/backend (saves never reject — failures
+		// are surfaced by flush()).
+		await this.persistQueue;
+
 		if (this.websocketEventUnsubscribe) {
 			this.websocketEventUnsubscribe();
 			this.websocketEventUnsubscribe = null;
@@ -232,12 +267,12 @@ export class FatosServer {
 		}
 
 		if (!this.server) {
-			return Promise.resolve();
+			return;
 		}
 
 		const toClose = this.server;
 		this.server = null;
-		return new Promise((resolve, reject) => {
+		await new Promise<void>((resolve, reject) => {
 			toClose.close((error) => {
 				if (error) {
 					reject(error);
@@ -439,7 +474,42 @@ export class FatosServer {
 			});
 		}
 
+		this.persist();
 		return facts;
+	}
+
+	/**
+	 * Queues a snapshot save after the commit. `transact` stays synchronous
+	 * (existing API), so saves run on an ordered promise chain: each save
+	 * captures the db state right after its commit and runs strictly after the
+	 * previous save. Failures are captured and rethrown by the next `flush()`.
+	 */
+	private persist(): void {
+		const storage = this.storage;
+		if (!storage) {
+			return;
+		}
+
+		const snapshot = { facts: this.db.getFacts(), transactions: this.db.getTransactions() };
+		this.persistQueue = this.persistQueue
+			.then(() => storage.save(snapshot))
+			.catch((error: unknown) => {
+				this.lastPersistError = error instanceof Error ? error : new Error(String(error));
+			});
+	}
+
+	/**
+	 * Awaits all queued storage saves and rethrows the first save failure since
+	 * the previous call. Use it before shutting down or before creating a new
+	 * server instance seeded from the same adapter.
+	 */
+	async flush(): Promise<void> {
+		await this.persistQueue;
+		if (this.lastPersistError) {
+			const error = this.lastPersistError;
+			this.lastPersistError = null;
+			throw error;
+		}
 	}
 
 	private filteredFacts(searchParams: URLSearchParams): readonly Fact[] {
@@ -636,6 +706,6 @@ export class FatosServer {
 	}
 }
 
-export function createFatosServer(): FatosServer {
-	return new FatosServer();
+export function createFatosServer(options?: FatosServerOptions): FatosServer {
+	return new FatosServer(options);
 }

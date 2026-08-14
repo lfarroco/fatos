@@ -415,3 +415,68 @@ back to sub-agents for fixes.
   pending resolution, or resolve the idle await on a disposal flag), or
   document that consumers must call `dispose()` rather than `return()`.
 - **Resolution**: none (documented; tests avoid the path for now).
+
+## [2026-08-14] persistence — Phase 5 storage adapters + server wiring (design/04)
+- **Task**: Phase 5 persistence (PLAN.md Phase 5; docs/design/04-phasing.md P0 "Cross-package import cleanup" follow-through: @fatos/persistence was a stub package)
+- **Found by**: Phase 5 implementation (packages/persistence, packages/server, packages/core)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Implemented the persistence layer and wired it into the
+  server. Design decisions recorded:
+  - **`StorageAdapter` contract**: `load(): Promise<DatabaseSnapshot>` (empty
+    snapshot when the backend holds nothing), `save(snapshot): Promise<void>`,
+    `close(): Promise<void>`. `DatabaseSnapshot = { facts, transactions }`
+    lives in **@fatos/core** (it is the engine's restore input) and is
+    re-exported by @fatos/persistence — one definition, no type drift.
+  - **Snapshot replay is a new `FactDatabase.restore()` in core, not
+    `transact()` re-entry.** Replaying stored facts through the public
+    `transact` is provably wrong: committed schema facts carry negative eids
+    (`[-1, 'db/ident', ...]`) and `transact` remaps negative eids as tempids,
+    which would corrupt the schema on reload. `restore()` appends facts
+    verbatim via the existing `appendFact`/`onFactCommitted` paths (indexes +
+    schema rebuilt identically), validates ordering invariants (facts ascending
+    by tx, tx sets match the ledger exactly), and continues `nextTx` after the
+    max restored tx. This is an additive public API; core tests untouched and
+    green (+5 restore tests).
+  - **Persisted value encoding reuses the P3 wire tags** (`serializeValue` /
+    `deserializeValue`: `$ref`/`$lookupRef`/`$date`/`$bigint`). File/postgres/
+    mongo/indexeddb snapshots are JSON-safe and Date/bigint/ref values
+    round-trip losslessly. Transaction metadata is tagged per top-level key.
+  - **Save-on-every-transaction, ordered and async, not debounced.** `transact`
+    stays synchronous (existing public API), so `persist()` queues snapshot
+    saves on a promise chain: each save captures the db state right after its
+    commit and runs strictly after the previous save (no interleaving, commit
+    order preserved). Failures are captured and rethrown by the new public
+    `flush()`; `stop()` also awaits the queue so a stopped server leaves a
+    consistent snapshot. Debouncing was rejected: for small-to-mid DBs a full
+    snapshot save per tx is simpler and crash-consistent; revisit if a write
+    benchmark warrants batching.
+  - **Driver injection, no new runtime deps.** Postgres takes a pg-shaped
+    `SQLExecutor` (`{ query(sql, params) => { rows } }`, `$1` placeholders;
+    documented `new PostgresAdapter({ query: (sql, p) => pool.query(sql, p) })`);
+    Mongo takes a collection-like (`findOne`/`replaceOne` — a real mongodb
+    Collection qualifies structurally). Neither adapter closes a driver it was
+    handed. One table `fatos_snapshot(id INTEGER PRIMARY KEY, payload TEXT)` /
+    one document `{ _id: 'fatos-snapshot', payload }`; save is a single atomic
+    statement per backend.
+  - **File adapter writes temp + rename** (same dir, pid/timestamp/random
+    suffix) for atomic replaces; `load()` treats ENOENT as an empty snapshot
+    and errors clearly on invalid JSON/shape. Parent dirs are created on save.
+  - **IndexedDB adapter uses local structural IDB types** (the persistence
+    tsconfig compiles with `lib: ES2020`, no DOM), accessed via
+    `globalThis.indexedDB` with a clear error when unavailable; one object
+    store, one record under a fixed key. Close() releases the cached
+    connection; load/save reopen lazily.
+  - **Server seeding happens once per instance** (`seeded` flag): the in-memory
+    db survives start/stop cycles, so a second `start()` does not re-restore
+    onto a non-empty db (restore() throws there by design).
+- **Resolution**: core + restore.test.ts (5 tests); persistence package rebuilt
+  from stubs (types.ts, serialization.ts, adapters file/postgres/mongodb/
+  indexeddb/memory, index exports, package.json ./indexeddb + ./memory export
+  subpaths, 27 new tests across memory/file/postgres/mongodb/indexeddb);
+  server wiring (storage option, load+restore on start, persist-after-transact,
+  flush(), stop() drains saves, createFatosServer(options?)) + 2 server tests.
+  Validation: persistence build/typecheck/tests green (29 tests), server
+  build/typecheck/tests green (11 tests), core tests green (212 tests).
+  Open limitation: the IndexedDB adapter's runtime shape is verified only
+  against the fake — a real-browser smoke test would be a follow-up.
