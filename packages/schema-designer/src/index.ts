@@ -5,6 +5,7 @@
  */
 
 import { ref, type EntityId } from '@fatos/core';
+import { defaultReferenceAttributeName } from './editor';
 
 export const version = '0.0.1';
 
@@ -401,7 +402,7 @@ export function toFatosTransactionEntries(document: SchemaDesignerDocument): Tra
 			continue;
 		}
 
-		const referenceName = relationship.referenceAttributeName ?? `${targetEntity.name}Id`;
+		const referenceName = relationship.referenceAttributeName ?? defaultReferenceAttributeName(targetEntity.name);
 		const ident = toAttributeIdent(sourceEntity.name, referenceName);
 		refIdents.add(ident);
 		if (!schemaIdents.has(ident)) {
@@ -433,13 +434,18 @@ export {
 	addAttribute,
 	addEntity,
 	addRelationship,
+	defaultReferenceAttributeName,
+	formatCardinalityHint,
 	moveEntity,
+	removeRelationship,
 	renameEntity,
 	updateAttribute,
+	updateRelationship,
 	updateRelationshipName,
 	type AddAttributeOptions,
 	type AddEntityOptions,
 	type AddRelationshipOptions,
-	type UpdateAttributeOptions
+	type UpdateAttributeOptions,
+	type UpdateRelationshipOptions
 } from './editor';
 

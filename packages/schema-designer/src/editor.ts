@@ -36,6 +36,50 @@ export type UpdateAttributeOptions = {
 	cardinality?: Cardinality;
 };
 
+export type UpdateRelationshipOptions = {
+	name?: string;
+	fromCardinality?: Cardinality;
+	toCardinality?: Cardinality;
+	referenceAttributeName?: string;
+};
+
+/**
+ * Builds the default reference attribute name used when a relationship is
+ * created without an explicit one: the target entity name in camelCase with an
+ * `Id` suffix (e.g. `Org` -> `orgId`, `Blog Post` -> `blogPostId`).
+ */
+export function defaultReferenceAttributeName(targetEntityName: string): string {
+	const words = targetEntityName
+		.trim()
+		.split(/[^a-zA-Z0-9]+/)
+		.filter((word) => word.length > 0);
+
+	if (words.length === 0) {
+		return 'Id';
+	}
+
+	const camelCase = words
+		.map((word, index) => {
+			const lower = word.toLowerCase();
+			if (index === 0) {
+				return lower;
+			}
+			return lower.charAt(0).toUpperCase() + lower.slice(1);
+		})
+		.join('');
+
+	return `${camelCase}Id`;
+}
+
+/**
+ * Renders a relationship's cardinalities as a compact hint (e.g. `1 — n` for
+ * one-to-many, `n — m` for many-to-many).
+ */
+export function formatCardinalityHint(fromCardinality: Cardinality, toCardinality: Cardinality): string {
+	const symbol = (cardinality: Cardinality): string => (cardinality === 'one' ? '1' : 'n');
+	return `${symbol(fromCardinality)} — ${symbol(toCardinality)}`;
+}
+
 function slugify(value: string): string {
 	const normalized = value
 		.trim()
@@ -248,9 +292,14 @@ export function addRelationship(
 		return document;
 	}
 
+	const name = options.name.trim() || `${options.fromEntityId} -> ${options.toEntityId}`;
+	if (document.schema.relationships.some((relationship) => relationship.name.trim() === name)) {
+		return document;
+	}
+
 	const relationship: SchemaDesignerRelationship = {
 		id: `rel-${nextRelationshipOrdinal(document)}`,
-		name: options.name.trim() || `${options.fromEntityId} -> ${options.toEntityId}`,
+		name,
 		fromEntityId: options.fromEntityId,
 		toEntityId: options.toEntityId,
 		fromCardinality: options.fromCardinality,
@@ -267,10 +316,10 @@ export function addRelationship(
 	};
 }
 
-export function updateRelationshipName(
+export function updateRelationship(
 	document: SchemaDesignerDocument,
 	relationshipId: string,
-	name: string
+	patch: UpdateRelationshipOptions
 ): SchemaDesignerDocument {
 	return {
 		...document,
@@ -281,11 +330,41 @@ export function updateRelationshipName(
 					return relationship;
 				}
 
+				const nextName = patch.name?.trim();
+				const nextReferenceAttributeName =
+					patch.referenceAttributeName === undefined
+						? relationship.referenceAttributeName
+						: patch.referenceAttributeName.trim() || undefined;
+
 				return {
 					...relationship,
-					name
+					name: nextName === undefined || nextName === '' ? relationship.name : nextName,
+					fromCardinality: patch.fromCardinality ?? relationship.fromCardinality,
+					toCardinality: patch.toCardinality ?? relationship.toCardinality,
+					referenceAttributeName: nextReferenceAttributeName
 				};
 			})
 		}
 	};
+}
+
+export function removeRelationship(
+	document: SchemaDesignerDocument,
+	relationshipId: string
+): SchemaDesignerDocument {
+	return {
+		...document,
+		schema: {
+			...document.schema,
+			relationships: document.schema.relationships.filter((relationship) => relationship.id !== relationshipId)
+		}
+	};
+}
+
+export function updateRelationshipName(
+	document: SchemaDesignerDocument,
+	relationshipId: string,
+	name: string
+): SchemaDesignerDocument {
+	return updateRelationship(document, relationshipId, { name });
 }

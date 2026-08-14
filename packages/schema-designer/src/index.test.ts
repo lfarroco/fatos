@@ -8,6 +8,9 @@ import {
 	addAttribute,
 	addEntity,
 	addRelationship,
+	defaultReferenceAttributeName,
+	formatCardinalityHint,
+	removeRelationship,
 	SchemaDesignerValidationError,
 	createEmptySchemaDesignerDocument,
 	exportSchemaDesignerDocument,
@@ -17,6 +20,7 @@ import {
 	toFatosTransactionEntries,
 	toSchemaDesignerDocumentFromFatosSnapshot,
 	updateAttribute,
+	updateRelationship,
 	updateRelationshipName,
 	version
 } from './index';
@@ -235,5 +239,137 @@ describe('@fatos/schema-designer', () => {
 
 		const updated = updateRelationshipName(linked, relationshipId as string, 'belongs_to_org');
 		expect(updated.schema.relationships[0]?.name).toBe('belongs_to_org');
+	});
+
+	it('rejects self-referencing relationships', () => {
+		const created = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const linked = addRelationship(created.document, {
+			name: 'self_loop',
+			fromEntityId: created.entityId,
+			toEntityId: created.entityId,
+			fromCardinality: 'one',
+			toCardinality: 'many'
+		});
+
+		expect(linked.schema.relationships).toHaveLength(0);
+	});
+
+	it('rejects duplicate relationship names', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one'
+		});
+		const duplicated = addRelationship(linked, {
+			name: '  member_of  ',
+			fromEntityId: second.entityId,
+			toEntityId: first.entityId,
+			fromCardinality: 'one',
+			toCardinality: 'many'
+		});
+
+		expect(duplicated.schema.relationships).toHaveLength(1);
+	});
+
+	it('partially updates a relationship and clears the reference attribute', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one',
+			referenceAttributeName: 'orgId'
+		});
+
+		const relationshipId = linked.schema.relationships[0]?.id;
+		expect(relationshipId).toBeDefined();
+
+		const partial = updateRelationship(linked, relationshipId as string, { toCardinality: 'many' });
+		expect(partial.schema.relationships[0]?.toCardinality).toBe('many');
+		expect(partial.schema.relationships[0]?.name).toBe('member_of');
+		expect(partial.schema.relationships[0]?.fromCardinality).toBe('many');
+		expect(partial.schema.relationships[0]?.referenceAttributeName).toBe('orgId');
+
+		const cleared = updateRelationship(partial, relationshipId as string, { referenceAttributeName: '   ' });
+		expect(cleared.schema.relationships[0]?.referenceAttributeName).toBeUndefined();
+	});
+
+	it('updateRelationshipName trims names and ignores empty names', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one'
+		});
+
+		const relationshipId = linked.schema.relationships[0]?.id;
+		expect(relationshipId).toBeDefined();
+
+		const trimmed = updateRelationshipName(linked, relationshipId as string, '  author_of  ');
+		expect(trimmed.schema.relationships[0]?.name).toBe('author_of');
+
+		const kept = updateRelationshipName(trimmed, relationshipId as string, '');
+		expect(kept.schema.relationships[0]?.name).toBe('author_of');
+	});
+
+	it('ignores updates and removals for unknown relationship ids', () => {
+		const first = addEntity(createEmptySchemaDesignerDocument('Designer'), { name: 'User' });
+		const second = addEntity(first.document, { name: 'Org' });
+		const linked = addRelationship(second.document, {
+			name: 'member_of',
+			fromEntityId: first.entityId,
+			toEntityId: second.entityId,
+			fromCardinality: 'many',
+			toCardinality: 'one'
+		});
+
+		const updated = updateRelationship(linked, 'missing', { name: 'renamed' });
+		expect(updated.schema.relationships).toEqual(linked.schema.relationships);
+
+		const removed = removeRelationship(linked, 'missing');
+		expect(removed.schema.relationships).toEqual(linked.schema.relationships);
+	});
+
+	it('builds camelCase default reference attribute names', () => {
+		expect(defaultReferenceAttributeName('Org')).toBe('orgId');
+		expect(defaultReferenceAttributeName('User')).toBe('userId');
+		expect(defaultReferenceAttributeName('Blog Post')).toBe('blogPostId');
+		expect(defaultReferenceAttributeName('order-item')).toBe('orderItemId');
+		expect(defaultReferenceAttributeName('')).toBe('Id');
+	});
+
+	it('formats cardinality hints', () => {
+		expect(formatCardinalityHint('one', 'one')).toBe('1 — 1');
+		expect(formatCardinalityHint('one', 'many')).toBe('1 — n');
+		expect(formatCardinalityHint('many', 'one')).toBe('n — 1');
+		expect(formatCardinalityHint('many', 'many')).toBe('n — n');
+	});
+
+	it('derives the reference attribute ident from the target entity name when unspecified', () => {
+		const document = createEmptySchemaDesignerDocument('CRM');
+		document.schema.entities.push(
+			{ id: 'user', name: 'User', position: { x: 0, y: 0 }, attributes: [] },
+			{ id: 'org', name: 'Org', position: { x: 300, y: 0 }, attributes: [] }
+		);
+		document.schema.relationships.push({
+			id: 'user-org',
+			name: 'belongs_to',
+			fromEntityId: 'user',
+			toEntityId: 'org',
+			fromCardinality: 'many',
+			toCardinality: 'one'
+		});
+
+		const entries = toFatosTransactionEntries(document);
+		expect(entries).toContainEqual({ ident: 'User/orgId', valueType: 'ref', cardinality: 'one' });
 	});
 });

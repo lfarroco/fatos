@@ -16,6 +16,44 @@ Format:
 
 ---
 
+## [2026-08-14] schema-designer — Phase 7 relationship editing flow implemented
+- **Task**: Phase 7: Add relationship editing flow (one-to-one, one-to-many, many-to-many)
+- **Found by**: schema-designer implementation (packages/schema-designer)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Landed the full relationship editing flow. New editor helpers:
+  `updateRelationship(document, id, patch)` (name/fromCardinality/
+  toCardinality/referenceAttributeName), `removeRelationship(document, id)`,
+  `defaultReferenceAttributeName(targetName)` (camelCase + `Id` suffix, e.g.
+  `Org` -> `orgId`), and `formatCardinalityHint(from, to)` (`1 — n`, `n — m`,
+  ...). Notable behaviors/limitations recorded:
+  - **Duplicate relationship names are now rejected in `addRelationship`**
+    (trimmed comparison against existing names). Self-references and missing
+    entity ids were already rejected; both are now pinned by tests.
+  - **`updateRelationshipName` now delegates to `updateRelationship`**, so empty
+    names are ignored (keeps the previous name) instead of being stored
+    verbatim; names are trimmed. This is a small semantic tightening of the
+    existing helper.
+  - **`updateRelationship` treats a blank `referenceAttributeName` patch as
+    "clear"** (stored as `undefined`); omitting the field keeps the current
+    value. A relationship can therefore be edited back to using the
+    `<Target>Id` default at adapter time.
+  - **The default reference attribute name is now camelCase** (`orgId`) via
+    `defaultReferenceAttributeName`; the adapter (`toFatosTransactionEntries`)
+    previously fell back to `${targetEntity.name}Id` verbatim (`OrgId`). The new
+    default matches the existing test fixtures; only documents that relied on
+    the un-camelCased fallback would see a different emitted ident.
+  - **Canvas labels** are now clickable (selects the relationship), show the
+    cardinality hint and resolved reference attribute name, and highlight when
+    selected; the right panel gained selectable relationship rows plus a
+    Relationship Inspector (name, from/to cardinality, reference attribute,
+    Delete). The connect form pre-fills `<Target>Id` and refreshes it when the
+    target changes unless the user customized it.
+- **Resolution**: editor.ts (2 new helpers + 1 new type, duplicate-name
+  validation), index.ts exports + adapter fallback, react.ts inspector/select/
+  delete/label flow, +9 tests (18 total in package). Validation: build +
+  typecheck + vitest green; examples typecheck green.
+
 ## [2026-08-14] core — P0 value model & schema support (design/01) implemented
 - **Task**: P0 value model & schema support (docs/design/01-data-model.md, docs/design/04-phasing.md P0)
 - **Found by**: P0 value model implementation (packages/core)

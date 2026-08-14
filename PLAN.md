@@ -436,7 +436,7 @@ packages/
 - [x] Add conversion from schema-designer documents to Fatos transaction entries
 - [x] Add conversion from Fatos snapshot payloads (schemas + entities) to schema-designer documents
 - [x] Scaffold React canvas shell with draggable entity nodes
-- [ ] Add relationship editing flow (one-to-one, one-to-many, many-to-many)
+- [x] Add relationship editing flow (one-to-one, one-to-many, many-to-many)
 - [ ] Integrate file import/export UI in DevTools panel
 - [ ] Add round-trip import/export + adapter test fixtures
 

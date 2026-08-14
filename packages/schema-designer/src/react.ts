@@ -11,10 +11,13 @@ import {
 	addAttribute,
 	addEntity,
 	addRelationship,
+	defaultReferenceAttributeName,
+	formatCardinalityHint,
 	moveEntity,
+	removeRelationship,
 	renameEntity,
 	updateAttribute,
-	updateRelationshipName
+	updateRelationship
 } from './editor';
 
 export type SchemaDesignerWorkspaceProps = {
@@ -97,6 +100,18 @@ const inputStyle: React.CSSProperties = {
 	background: '#ffffff'
 };
 
+const dangerButtonStyle: React.CSSProperties = {
+	...buttonStyle,
+	background: '#b91c1c',
+	border: '1px solid #b91c1c'
+};
+
+const smallLabelStyle: React.CSSProperties = {
+	fontSize: '11px',
+	fontWeight: 600,
+	color: '#334155'
+};
+
 function defaultConnectDraft(): ConnectDraft {
 	return {
 		name: '',
@@ -111,10 +126,12 @@ function defaultConnectDraft(): ConnectDraft {
 function withEntityDefaults(document: SchemaDesignerDocument): ConnectDraft {
 	const first = document.schema.entities[0]?.id ?? '';
 	const second = document.schema.entities[1]?.id ?? first;
+	const toEntityName = document.schema.entities.find((entity) => entity.id === second)?.name ?? '';
 	return {
 		...defaultConnectDraft(),
 		fromEntityId: first,
-		toEntityId: second
+		toEntityId: second,
+		referenceAttributeName: defaultReferenceAttributeName(toEntityName)
 	};
 }
 
@@ -127,6 +144,7 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 	const [jsonText, setJsonText] = React.useState('');
 	const [jsonError, setJsonError] = React.useState('');
 	const [selectedEntityId, setSelectedEntityId] = React.useState<string>('');
+	const [selectedRelationshipId, setSelectedRelationshipId] = React.useState<string>('');
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 
 	const updateDocument = React.useCallback(
@@ -137,22 +155,42 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 		[props]
 	);
 
-	React.useEffect(() => {
-		setConnectDraft((current) => {
-			if (current.fromEntityId !== '' && current.toEntityId !== '') {
-				return current;
-			}
-
-			return withEntityDefaults(document);
-		});
-	}, [document]);
-
 	const entityById = React.useMemo(
 		() => new Map(document.schema.entities.map((entity) => [entity.id, entity])),
 		[document]
 	);
 
+	React.useEffect(() => {
+		setConnectDraft((current) => {
+			if (current.fromEntityId !== '' && current.toEntityId !== '') {
+				if (current.referenceAttributeName !== '') {
+					return current;
+				}
+
+				const toEntityName = entityById.get(current.toEntityId)?.name ?? '';
+				return {
+					...current,
+					referenceAttributeName: defaultReferenceAttributeName(toEntityName)
+				};
+			}
+
+			return withEntityDefaults(document);
+		});
+	}, [document, entityById]);
+
+	React.useEffect(() => {
+		if (
+			selectedRelationshipId !== '' &&
+			!document.schema.relationships.some((relationship) => relationship.id === selectedRelationshipId)
+		) {
+			setSelectedRelationshipId('');
+		}
+	}, [document, selectedRelationshipId]);
+
 	const selectedEntity = selectedEntityId ? entityById.get(selectedEntityId) ?? null : null;
+	const selectedRelationship = selectedRelationshipId
+		? document.schema.relationships.find((relationship) => relationship.id === selectedRelationshipId) ?? null
+		: null;
 
 	const relationshipLayouts = React.useMemo(() => {
 		return document.schema.relationships.map((relationship, index) => {
@@ -167,6 +205,7 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 				const bendX = 112;
 				return {
 					relationship,
+					referenceAttributeName: relationship.referenceAttributeName ?? '',
 					startX,
 					startY,
 					endX,
@@ -188,6 +227,8 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 
 			return {
 				relationship,
+				referenceAttributeName:
+					relationship.referenceAttributeName ?? defaultReferenceAttributeName(toEntity.name),
 				startX,
 				startY,
 				endX,
@@ -241,6 +282,7 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 			return;
 		}
 
+		const previousIds = new Set(document.schema.relationships.map((relationship) => relationship.id));
 		const nextDocument = addRelationship(document, {
 			name: connectDraft.name,
 			fromEntityId: connectDraft.fromEntityId,
@@ -250,6 +292,11 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 			referenceAttributeName: connectDraft.referenceAttributeName
 		});
 		updateDocument(nextDocument);
+
+		const created = nextDocument.schema.relationships.find((relationship) => !previousIds.has(relationship.id));
+		if (created) {
+			setSelectedRelationshipId(created.id);
+		}
 	}, [connectDraft, document, updateDocument]);
 
 	const onAddAttribute = React.useCallback(() => {
@@ -274,13 +321,27 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 		}));
 	}, []);
 
-	const onToEntityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
-		const value = event.currentTarget.value;
-		setConnectDraft((current) => ({
-			...current,
-			toEntityId: value
-		}));
-	}, []);
+	const onToEntityChange = React.useCallback(
+		(event: React.ChangeEvent<HTMLSelectElement>) => {
+			const value = event.currentTarget.value;
+			const nextToEntityName = entityById.get(value)?.name ?? '';
+			const nextDefaultReference = defaultReferenceAttributeName(nextToEntityName);
+
+			setConnectDraft((current) => {
+				const previousToEntityName = entityById.get(current.toEntityId)?.name ?? '';
+				const previousDefaultReference = defaultReferenceAttributeName(previousToEntityName);
+				const untouchedReference =
+					current.referenceAttributeName === '' || current.referenceAttributeName === previousDefaultReference;
+
+				return {
+					...current,
+					toEntityId: value,
+					referenceAttributeName: untouchedReference ? nextDefaultReference : current.referenceAttributeName
+				};
+			});
+		},
+		[entityById]
+	);
 
 	const onFromCardinalityChange = React.useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
 		const value = event.currentTarget.value as Cardinality;
@@ -367,13 +428,68 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 		[document, updateDocument]
 	);
 
-	const onExistingRelationshipNameChange = React.useCallback(
-		(relationshipId: string) => (event: React.ChangeEvent<HTMLInputElement>) => {
-			const value = event.currentTarget.value;
-			updateDocument(updateRelationshipName(document, relationshipId, value));
+	const onSelectedRelationshipNameChange = React.useCallback(
+		(event: React.ChangeEvent<HTMLInputElement>) => {
+			if (!selectedRelationship) {
+				return;
+			}
+			updateDocument(updateRelationship(document, selectedRelationship.id, { name: event.currentTarget.value }));
 		},
-		[document, updateDocument]
+		[document, selectedRelationship, updateDocument]
 	);
+
+	const onSelectedRelationshipFromCardinalityChange = React.useCallback(
+		(event: React.ChangeEvent<HTMLSelectElement>) => {
+			if (!selectedRelationship) {
+				return;
+			}
+			updateDocument(
+				updateRelationship(document, selectedRelationship.id, {
+					fromCardinality: event.currentTarget.value as Cardinality
+				})
+			);
+		},
+		[document, selectedRelationship, updateDocument]
+	);
+
+	const onSelectedRelationshipToCardinalityChange = React.useCallback(
+		(event: React.ChangeEvent<HTMLSelectElement>) => {
+			if (!selectedRelationship) {
+				return;
+			}
+			updateDocument(
+				updateRelationship(document, selectedRelationship.id, {
+					toCardinality: event.currentTarget.value as Cardinality
+				})
+			);
+		},
+		[document, selectedRelationship, updateDocument]
+	);
+
+	const onSelectedRelationshipReferenceAttributeChange = React.useCallback(
+		(event: React.ChangeEvent<HTMLInputElement>) => {
+			if (!selectedRelationship) {
+				return;
+			}
+			updateDocument(
+				updateRelationship(document, selectedRelationship.id, {
+					referenceAttributeName: event.currentTarget.value
+				})
+			);
+		},
+		[document, selectedRelationship, updateDocument]
+	);
+
+	const onDeleteSelectedRelationship = React.useCallback(() => {
+		if (!selectedRelationship) {
+			return;
+		}
+		updateDocument(removeRelationship(document, selectedRelationship.id));
+		setSelectedRelationshipId('');
+	}, [document, selectedRelationship, updateDocument]);
+
+	const connectToEntityName = entityById.get(connectDraft.toEntityId)?.name ?? '';
+	const connectDefaultReference = defaultReferenceAttributeName(connectToEntityName);
 
 	return React.createElement(
 		'div',
@@ -524,19 +640,29 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 						'div',
 						{
 							key: layout.relationship.id,
+							onClick: () => setSelectedRelationshipId(layout.relationship.id),
 							style: {
 								position: 'absolute',
 								top: `${layout.labelY}px`,
 								left: `${layout.labelX}px`,
 								fontSize: '11px',
-								padding: '2px 6px',
+								padding: '3px 8px',
 								borderRadius: '999px',
-								border: '1px solid #155e75',
-								background: '#cffafe',
-								boxShadow: '0 1px 2px rgba(15, 23, 42, 0.2)'
+								border: selectedRelationshipId === layout.relationship.id ? '2px solid #0f766e' : '1px solid #155e75',
+								background: selectedRelationshipId === layout.relationship.id ? '#99f6e4' : '#cffafe',
+								boxShadow: '0 1px 2px rgba(15, 23, 42, 0.2)',
+								cursor: 'pointer',
+								userSelect: 'none',
+								display: 'grid',
+								gap: '1px'
 							}
 						},
-						`${layout.relationship.name}: ${layout.relationship.fromCardinality} -> ${layout.relationship.toCardinality}`
+						React.createElement('div', { style: { fontWeight: 600 } }, layout.relationship.name),
+						React.createElement(
+							'div',
+							{ style: { opacity: 0.85 } },
+							`${formatCardinalityHint(layout.relationship.fromCardinality, layout.relationship.toCardinality)} · ${layout.referenceAttributeName}`
+						)
 					)
 				),
 				document.schema.entities.map((entity) =>
@@ -593,6 +719,7 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 			'aside',
 			{ style: rightPanelStyle },
 			React.createElement('h4', { style: { margin: 0, fontSize: '13px' } }, 'Relationships'),
+			React.createElement('div', { style: smallLabelStyle }, 'New relationship'),
 			React.createElement('input', {
 				style: inputStyle,
 				placeholder: 'Relationship name',
@@ -647,41 +774,118 @@ export function SchemaDesignerWorkspace(props: SchemaDesignerWorkspaceProps): Re
 			),
 			React.createElement('input', {
 				style: inputStyle,
-				placeholder: 'Reference attribute (optional)',
+				placeholder: `Reference attribute (default: ${connectDefaultReference})`,
 				value: connectDraft.referenceAttributeName,
 				onChange: onReferenceAttributeChange
 			}),
 			React.createElement('button', { type: 'button', style: buttonStyle, onClick: onCreateRelationship }, 'Connect'),
+			React.createElement('div', { style: { ...smallLabelStyle, marginTop: '6px' } }, 'Existing'),
 			React.createElement(
 				'div',
 				{ style: { display: 'grid', gap: '8px' } },
-				document.schema.relationships.map((relationship) =>
-					React.createElement(
+				document.schema.relationships.map((relationship) => {
+					const toEntityName = entityById.get(relationship.toEntityId)?.name ?? relationship.toEntityId;
+					const referenceAttributeName =
+						relationship.referenceAttributeName ?? defaultReferenceAttributeName(toEntityName);
+					const selected = selectedRelationshipId === relationship.id;
+
+					return React.createElement(
 						'div',
 						{
 							key: relationship.id,
+							onClick: () => setSelectedRelationshipId(relationship.id),
 							style: {
 								padding: '8px',
-								border: '1px solid #cbd5e1',
+								border: selected ? '2px solid #0f766e' : '1px solid #cbd5e1',
 								borderRadius: '8px',
-								background: '#f8fafc',
+								background: selected ? '#ccfbf1' : '#f8fafc',
 								display: 'grid',
-								gap: '6px'
+								gap: '4px',
+								cursor: 'pointer'
 							}
 						},
+						React.createElement(
+							'div',
+							{ style: { fontSize: '12px', fontWeight: 600 } },
+							relationship.name
+						),
+						React.createElement(
+							'div',
+							{ style: { fontSize: '11px', color: '#334155' } },
+							`${formatCardinalityHint(relationship.fromCardinality, relationship.toCardinality)} · ${referenceAttributeName}`
+						)
+					);
+				})
+			),
+			selectedRelationship
+				? React.createElement(
+						'div',
+						{
+							style: {
+								display: 'grid',
+								gap: '8px',
+								padding: '10px',
+								border: '1px solid #0f766e',
+								borderRadius: '8px',
+								background: '#ecfeff'
+							}
+						},
+						React.createElement('div', { style: smallLabelStyle }, 'Relationship Inspector'),
 						React.createElement('input', {
 							style: inputStyle,
-							value: relationship.name,
-							onChange: onExistingRelationshipNameChange(relationship.id)
+							value: selectedRelationship.name,
+							placeholder: 'Relationship name',
+							onChange: onSelectedRelationshipNameChange
+						}),
+						React.createElement(
+							'div',
+							{ style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } },
+							React.createElement(
+								'select',
+								{
+									style: inputStyle,
+									value: selectedRelationship.fromCardinality,
+									onChange: onSelectedRelationshipFromCardinalityChange
+								},
+								React.createElement('option', { value: 'one' }, 'from one'),
+								React.createElement('option', { value: 'many' }, 'from many')
+							),
+							React.createElement(
+								'select',
+								{
+									style: inputStyle,
+									value: selectedRelationship.toCardinality,
+									onChange: onSelectedRelationshipToCardinalityChange
+								},
+								React.createElement('option', { value: 'one' }, 'to one'),
+								React.createElement('option', { value: 'many' }, 'to many')
+							)
+						),
+						React.createElement('input', {
+							style: inputStyle,
+							value: selectedRelationship.referenceAttributeName ?? '',
+							placeholder: `Reference attribute (default: ${defaultReferenceAttributeName(
+								entityById.get(selectedRelationship.toEntityId)?.name ?? ''
+							)})`,
+							onChange: onSelectedRelationshipReferenceAttributeChange
 						}),
 						React.createElement(
 							'div',
 							{ style: { fontSize: '11px', color: '#334155' } },
-							`${relationship.fromCardinality} ${relationship.fromEntityId} -> ${relationship.toCardinality} ${relationship.toEntityId}`
-						)
+							`${formatCardinalityHint(
+								selectedRelationship.fromCardinality,
+								selectedRelationship.toCardinality
+							)} · ${selectedRelationship.referenceAttributeName ?? defaultReferenceAttributeName(
+								entityById.get(selectedRelationship.toEntityId)?.name ?? ''
+							)}`
+						),
+						React.createElement('button', {
+							type: 'button',
+							style: dangerButtonStyle,
+							onClick: onDeleteSelectedRelationship
+						}, 'Delete Relationship')
 					)
-				)
-			),
+				: null,
 			React.createElement('hr', { style: { width: '100%', border: 0, borderTop: '1px solid #cbd5e1' } }),
 			React.createElement('h4', { style: { margin: 0, fontSize: '13px' } }, 'Import / Export JSON'),
 			React.createElement('button', {
