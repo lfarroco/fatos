@@ -291,3 +291,40 @@ back to sub-agents for fixes.
   `describe('db.liveQuery', ...)` block).
 - **Resolution**: none (noted; core untouched in this run).
 
+
+## [2026-08-14] react — P2 selector hooks land; design-doc live() selector signature differs from core
+- **Task**: P2 React half (selector hooks + memoized snapshots, packages/react only)
+- **Found by**: P2 React implementation (packages/react)
+- **Severity**: medium
+- **Status**: open
+- **Description**: `docs/design/03-reactivity-and-wire.md` shows the access-tracking
+  form as `db.live(db => db.find(...))` — the selector receives the database as
+  an argument — but the implemented core `live(fn)` (packages/core) stores `fn`
+  as the handle's `read` and calls it with **no arguments** (`evaluateLive` →
+  `handle.read()`), and both core and client type the overload as
+  `live<T>(fn: () => T)`. A caller following the design doc gets `undefined`
+  as the `db` parameter. The new React selector hook
+  (`useQuery((db: FatosClient) => T)`) keeps the design-doc selector shape and
+  supplies the client from context itself (`client.live(() => selector(client))`),
+  so the hook API is unaffected; the doc/core mismatch remains for direct
+  `live(fn)` users. Options for later: pass the db into `fn` (breaking change to
+  the no-arg type), or update the design doc + React hook signature to a
+  no-arg selector.
+- **Resolution**: react hook implemented with the client supplied from context;
+  core/client untouched in this run.
+
+## [2026-08-14] react — tests use react-test-renderer (deprecated) pinned to React 18 types
+- **Task**: P2 React half (tests, packages/react only)
+- **Found by**: P2 React implementation (packages/react)
+- **Severity**: low
+- **Status**: open
+- **Description**: The vitest environment is `node` (root vitest.config) with no
+  jsdom/happy-dom and no DOM shim in the repo, and `react-dom/client` needs a
+  DOM. The P2 hook tests therefore use `react-test-renderer` (new devDependency,
+  works without a DOM). React docs mark react-test-renderer deprecated (React
+  19 removed it), and `@types/react-test-renderer` resolves to 19.x by default,
+  which is incompatible with the React 18.3 types used here — it had to be
+  pinned to `18.3.1`. When the repo upgrades to React 19, swap the tests to
+  `react-dom/client` + a DOM environment or @testing-library.
+- **Resolution**: devDeps added to packages/react only (`react-test-renderer@^18.3.1`,
+  `@types/react-test-renderer@^18.3.1`); package-lock.json updated.
