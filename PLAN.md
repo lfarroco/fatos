@@ -427,7 +427,7 @@ packages/
 
 - Time travel UI
 - Graph visualization
-- Export/import functionality
+- [x] Export/import functionality
 - Client-server sync strategies
 
 ### Phase 7: Schema Designer (React-powered)
@@ -437,8 +437,8 @@ packages/
 - [x] Add conversion from Fatos snapshot payloads (schemas + entities) to schema-designer documents
 - [x] Scaffold React canvas shell with draggable entity nodes
 - [x] Add relationship editing flow (one-to-one, one-to-many, many-to-many)
-- [ ] Integrate file import/export UI in DevTools panel
-- [ ] Add round-trip import/export + adapter test fixtures
+- [x] Integrate file import/export UI in DevTools panel
+- [x] Add round-trip import/export + adapter test fixtures
 
 ## Non-Goals (initial version)
 

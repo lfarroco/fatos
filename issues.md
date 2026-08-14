@@ -599,3 +599,54 @@ back to sub-agents for fixes.
   build/typecheck/tests green (11 tests), core tests green (212 tests).
   Open limitation: the IndexedDB adapter's runtime shape is verified only
   against the fake — a real-browser smoke test would be a follow-up.
+
+## [2026-08-14] devtools + schema-designer + persistence — Phase 6 export/import & Phase 7 round-trip fixtures
+- **Task**: Phase 6: Export/import functionality; Phase 7: Integrate file
+  import/export UI in DevTools panel; Add round-trip import/export + adapter
+  test fixtures
+- **Found by**: Phase 6/7 implementation (packages/devtools, packages/chrome-extension,
+  packages/schema-designer, packages/persistence)
+- **Severity**: low
+- **Status**: fixed (with documented deviations below)
+- **Description**: Landed devtools snapshot export/import
+  (`serializeSnapshot`/`deserializeSnapshot` pure + `SnapshotFormatError`,
+  `downloadSnapshot`/`pickSnapshotFile` DOM-guarded and injectable via a
+  `FileIo` interface), controller `exportSnapshot()`/`importSnapshot(text)`,
+  Export/Import buttons in the chrome-extension panel, a schema-designer
+  round-trip fixture (`makeBlogDocument` → `toFatosTransactionEntries` → core
+  db → `FatosJsonSnapshot` → `toSchemaDesignerDocumentFromFatosSnapshot`) with
+  tests asserting schema attributes + data survive for string/date/bigint/
+  many/ref values, and a persistence serialization unit test for
+  Date/bigint/ref/array/metadata wire round-trips. Deviations and limitations:
+  - **`importSnapshot` returns `boolean`** (not `void` as the task sketch
+    suggested) so callers can distinguish success/failure and tests can assert
+    state preservation; the panel uses the return value + `getLastError()`.
+  - **DevTools export is the plain wire snapshot shape**
+    `{ facts, transactions, capturedAt?, url? }` (no `version` field);
+    `deserializeSnapshot` additionally accepts the persistence
+    `{ version: 1, ... }` envelope so FileAdapter exports import into the
+    panel. Values are tagged with the core wire tags (`$date`/`$bigint`/
+    `$ref`/`$lookupRef`), so Date/bigint/ref values survive losslessly.
+  - **`toSchemaDesignerDocumentFromFatosSnapshot` does not reconstruct
+    relationships** (always emits `relationships: []`): a round-trip document
+    loses relationship names and from/to cardinalities — only the ref
+    attribute (`valueType: 'ref'`) survives on the source entity. The
+    round-trip fixture asserts the ref-attribute form and the limitation is
+    accepted (the Fatos snapshot format does not carry relationship metadata).
+  - **The converter passes entity attribute values through verbatim**, so a
+    wire-form snapshot (e.g. a devtools export) imported into the schema
+    designer would surface `{ $date }`/`{ $bigint }`/`{ $ref }` objects in
+    `entitiesData` instead of engine Date/bigint/ref values. The round-trip
+    fixture goes through `db.find({})` (engine values) and stays green; a
+    follow-up could deserialize values in the converter.
+  - **Imported attribute ids are the converter's stable lowercased ids** (e.g.
+    `post:authorid` from `authorId`), so a re-imported document's attribute ids
+    may differ in casing from the source document's.
+- **Resolution**: devtools: new export-import.ts (+13 tests: 10 in
+  export-import.test.ts, 3 in controller.test.ts), controller + index exports;
+  chrome-extension: panel-ui.ts export/import wiring + panel.html buttons;
+  schema-designer: fixtures.ts + 1 round-trip test (19 total);
+  persistence: serialization.test.ts (+3, 32 total). Validation: devtools
+  build + typecheck + 55 tests green; chrome-extension build + typecheck + 2
+  tests green; schema-designer typecheck + 19 tests green; persistence
+  typecheck + 32 tests green; core 212 tests green (unchanged).

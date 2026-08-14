@@ -101,7 +101,11 @@
 <body>
 	<header>
 		<strong id="status">booting...</strong>
-		<button id="inspect-btn" type="button">Request Snapshot</button>
+		<div style="display: flex; gap: 8px;">
+			<button id="inspect-btn" type="button">Request Snapshot</button>
+			<button id="export-btn" type="button">Export</button>
+			<button id="import-btn" type="button">Import</button>
+		</div>
 	</header>
 	<div id="meta">
 		<div id="updated-at">last update: waiting for events</div>

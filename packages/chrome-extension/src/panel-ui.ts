@@ -1,13 +1,16 @@
 import {
 	DevtoolsPanelController,
+	downloadSnapshot,
 	formatValue,
 	groupFactsByEntity,
+	pickSnapshotFile,
 	renderDiff,
 	renderEntityView,
 	renderFactTable,
 	renderNotice,
 	renderQueryResults,
-	renderTimeline
+	renderTimeline,
+	serializeSnapshot
 } from '@fatos/devtools';
 import type { DevtoolsTabId, FactSnapshot, QuerySpec } from '@fatos/devtools';
 
@@ -406,6 +409,39 @@ function initPanelUi(): void {
 	const inspectButton = document.getElementById('inspect-btn');
 	inspectButton?.addEventListener('click', () => {
 		port.postMessage({ type: 'fatos:panel-request-inspect' });
+	});
+
+	const exportButton = document.getElementById('export-btn');
+	exportButton?.addEventListener('click', () => {
+		const snapshot = controller.getSnapshot();
+		if (snapshot === null) {
+			setText('status', 'no snapshot to export');
+			return;
+		}
+
+		downloadSnapshot(snapshot);
+		setText('status', 'snapshot exported');
+	});
+
+	const importButton = document.getElementById('import-btn');
+	importButton?.addEventListener('click', () => {
+		pickSnapshotFile()
+			.then((snapshot) => {
+				if (snapshot === null) {
+					return; // picker cancelled
+				}
+
+				if (controller.importSnapshot(serializeSnapshot(snapshot))) {
+					setText('status', 'snapshot imported');
+					renderActiveTab();
+					updateTabBar();
+				} else {
+					setText('status', `import failed: ${controller.getLastError() ?? 'unknown error'}`);
+				}
+			})
+			.catch((error) => {
+				setText('status', `import failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	});
 
 	renderActiveTab();

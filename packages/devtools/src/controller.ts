@@ -13,6 +13,7 @@ import { createClient } from '@fatos/client';
 import type { FatosClient, Fact, QuerySpec, QueryTerm, TransactionRecord } from '@fatos/client';
 import { createDatabase, deserializeValue } from '@fatos/core';
 import type { DiffResult, FactDatabase } from '@fatos/core';
+import { deserializeSnapshot, serializeSnapshot } from './export-import';
 import { isFactSnapshot } from './snapshot';
 import type { FactSnapshot } from './snapshot';
 
@@ -95,6 +96,38 @@ export class DevtoolsPanelController {
 	/** Last error from `setSnapshot` (invalid payload / rejected restore), if any. */
 	getLastError(): string | null {
 		return this.lastError;
+	}
+
+	/**
+	 * Serializes the current snapshot to its JSON wire form (Phase 6 export).
+	 * Throws when no snapshot is loaded yet.
+	 */
+	exportSnapshot(): string {
+		if (this.snapshot === null) {
+			throw new Error('no snapshot loaded; nothing to export');
+		}
+
+		return serializeSnapshot(this.snapshot);
+	}
+
+	/**
+	 * Parses snapshot JSON and rebuilds the client state from it (Phase 6
+	 * import): equivalent to `setSnapshot(deserializeSnapshot(text))`. Returns
+	 * `false` (and records a `lastError`) when the text is not valid snapshot
+	 * JSON; the previous state is kept in that case. Notifies every tab in both
+	 * outcomes.
+	 */
+	importSnapshot(text: string): boolean {
+		let snapshot: FactSnapshot;
+		try {
+			snapshot = deserializeSnapshot(text);
+		} catch (error) {
+			this.lastError = `import rejected: ${error instanceof Error ? error.message : String(error)}`;
+			this.notifyAll();
+			return false;
+		}
+
+		return this.setSnapshot(snapshot);
 	}
 
 	/**

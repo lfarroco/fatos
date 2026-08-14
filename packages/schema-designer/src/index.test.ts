@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ref } from '@fatos/core';
+import { createDatabase, ref, serializeValue } from '@fatos/core';
 import {
 	addAttribute,
 	addEntity,
@@ -24,6 +24,8 @@ import {
 	updateRelationshipName,
 	version
 } from './index';
+import type { FatosJsonSnapshot } from './index';
+import { makeBlogDocument } from './fixtures';
 
 describe('@fatos/schema-designer', () => {
 	it('should export version', () => {
@@ -142,6 +144,63 @@ describe('@fatos/schema-designer', () => {
 		expect(document.schema.entities.map((entity) => entity.name)).toEqual(['org', 'user']);
 		expect(document.entitiesData).toHaveLength(2);
 		expect(document.entitiesData[0]?.attributes).toBeDefined();
+	});
+
+	it('round-trips a document through a core database snapshot (Phase 7 fixture)', () => {
+		const document = makeBlogDocument();
+		const entries = toFatosTransactionEntries(document);
+
+		const db = createDatabase();
+		db.transact(entries);
+
+		const snapshot: FatosJsonSnapshot = {
+			schemas: db.getSchemas(),
+			entities: db
+				.find({})
+				.filter((entity) => typeof entity.id === 'number' && entity.id > 0) as Array<
+				Record<string, unknown> & { id: number }
+			>
+		};
+
+		const imported = toSchemaDesignerDocumentFromFatosSnapshot(snapshot);
+
+		// Schema entities survive with their attributes.
+		expect(imported.schema.entities.map((entity) => entity.name).sort()).toEqual(['post', 'user']);
+
+		const user = imported.schema.entities.find((entity) => entity.name === 'user');
+		expect(user?.attributes).toEqual(
+			expect.arrayContaining([
+				{ id: 'user:name', name: 'name', valueType: 'string', cardinality: 'one' },
+				{ id: 'user:born', name: 'born', valueType: 'date', cardinality: 'one' },
+				{ id: 'user:balance', name: 'balance', valueType: 'bigint', cardinality: 'one' },
+				{ id: 'user:tags', name: 'tags', valueType: 'string', cardinality: 'many' }
+			])
+		);
+
+		// The relationship survives as a ref attribute on the source entity.
+		// (The imported id is the converter's stable lowercased id.)
+		const post = imported.schema.entities.find((entity) => entity.name === 'post');
+		expect(post?.attributes).toContainEqual({
+			id: 'post:authorid',
+			name: 'authorId',
+			valueType: 'ref',
+			cardinality: 'one'
+		});
+
+		// Data attributes survive for the supported value types.
+		const alice = imported.entitiesData.find((row) => row.eid === 10);
+		expect(alice).toBeDefined();
+		expect(alice?.attributes['name']).toBe('Alice');
+		expect(serializeValue(alice?.attributes['born'])).toEqual({
+			$date: new Date('1990-01-02T03:04:05.000Z').getTime()
+		});
+		expect(serializeValue(alice?.attributes['balance'])).toEqual({ $bigint: '10' });
+		expect(alice?.attributes['tags']).toEqual(['admin', 'early-adopter']);
+
+		const hello = imported.entitiesData.find((row) => row.eid === 20);
+		expect(hello).toBeDefined();
+		expect(hello?.attributes['title']).toBe('Hello fatos');
+		expect(serializeValue(hello?.attributes['authorId'])).toEqual({ $ref: 10 });
 	});
 
 	it('adds and edits entities through editor helpers', () => {

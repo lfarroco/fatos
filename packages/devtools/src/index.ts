@@ -208,6 +208,17 @@ export {
 export { DevtoolsPanelController } from './controller';
 export type { DevtoolsRenderCallback, DevtoolsTabId } from './controller';
 
+export {
+	SnapshotFormatError,
+	createBrowserFileIo,
+	defaultSnapshotFilename,
+	deserializeSnapshot,
+	downloadSnapshot,
+	pickSnapshotFile,
+	serializeSnapshot
+} from './export-import';
+export type { FileIo } from './export-import';
+
 export type { DiffResult } from '@fatos/core';
 export type { EntityId, Fact, FactDatabase, TransactionRecord } from '@fatos/client';
 export type { QuerySpec, QueryTerm } from '@fatos/client';

@@ -125,4 +125,57 @@ describe('DevtoolsPanelController', () => {
 		controller.runQuery(nameQuery);
 		expect(queryCallback).toHaveBeenCalledTimes(3);
 	});
+
+	it('exports and imports snapshots as JSON text', () => {
+		const controller = new DevtoolsPanelController();
+		expect(() => controller.exportSnapshot()).toThrow(/no snapshot loaded/);
+
+		controller.setSnapshot(buildSnapshot());
+		const text = controller.exportSnapshot();
+
+		const parsed = JSON.parse(text) as { facts: unknown[]; transactions: unknown[] };
+		expect(Array.isArray(parsed.facts)).toBe(true);
+		expect(Array.isArray(parsed.transactions)).toBe(true);
+
+		const imported = new DevtoolsPanelController();
+		const factsCallback = vi.fn();
+		const queryCallback = vi.fn();
+		imported.setRenderCallback('facts', factsCallback);
+		imported.setRenderCallback('query', queryCallback);
+
+		expect(imported.importSnapshot(text)).toBe(true);
+		expect(imported.getFacts()).toEqual(controller.getFacts());
+		expect(imported.getTransactions()).toEqual(controller.getTransactions());
+		expect(imported.getLastError()).toBeNull();
+		expect(factsCallback).toHaveBeenCalledTimes(1);
+		expect(queryCallback).toHaveBeenCalledTimes(1);
+	});
+
+	it('importSnapshot rejects invalid text and keeps the previous state', () => {
+		const controller = new DevtoolsPanelController();
+		controller.setSnapshot(buildSnapshot());
+		const before = controller.getFacts();
+
+		expect(controller.importSnapshot('not json')).toBe(false);
+		expect(controller.getLastError()).toContain('import rejected');
+
+		const malformed = JSON.stringify({ facts: [{ nope: true }], transactions: [] });
+		expect(controller.importSnapshot(malformed)).toBe(false);
+		expect(controller.getLastError()).toContain('invalid snapshot');
+
+		expect(controller.getFacts()).toEqual(before);
+		expect(controller.hasSnapshot()).toBe(true);
+	});
+
+	it('imports a persistence-style versioned envelope', () => {
+		const controller = new DevtoolsPanelController();
+		const text = JSON.stringify({
+			version: 1,
+			facts: [[1, 'a', 'x', 1, 'add']],
+			transactions: [[1, 100, null]]
+		});
+
+		expect(controller.importSnapshot(text)).toBe(true);
+		expect(controller.getFacts()).toEqual([[1, 'a', 'x', 1, 'add']]);
+	});
 });
