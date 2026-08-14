@@ -128,7 +128,7 @@ function isFactTuple(value: unknown): value is Fact {
 		return false;
 	}
 
-	const [eid, attribute, , tx, op] = value;
+	const [eid, attribute, , tx, op] = value as unknown[];
 	return (
 		isEntityId(eid)
 		&& typeof attribute === 'string'
@@ -143,7 +143,7 @@ function isTransactionTuple(value: unknown): value is TransactionRecord {
 		return false;
 	}
 
-	const [tx, timestamp, metadata] = value;
+	const [tx, timestamp, metadata] = value as unknown[];
 	return (
 		Number.isInteger(tx)
 		&& (tx as number) >= 1

@@ -790,3 +790,23 @@ back to sub-agents for fixes.
   ref), and tests assert reference attributes, synthesized names, exact
   `toCardinality`, and defaulted `fromCardinality`; schema-designer build +
   typecheck + 20 tests green.
+
+## [2026-08-14] client + devtools — unsafe destructuring of `any[]` in tuple type guards (eslint)
+- **Task**: Fix 4 `@typescript-eslint/no-unsafe-assignment` errors
+- **Found by**: eslint run over packages/client and packages/devtools
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `isFactTuple` / `isTransactionTuple` type guards in
+  packages/client/src/sync.ts and packages/devtools/src/snapshot.ts (duplicated
+  helpers) destructured `value` directly after `Array.isArray`, which narrows
+  `unknown` to `any[]` and made every destructured element `any` — flagged as
+  unsafe assignment. `Array.isArray` itself narrows to `any[]` (lib.es5
+  `isArray(arg: any): arg is any[]`), so a cast to `unknown[]` before
+  destructuring restores `unknown` element typing; the existing element checks
+  (`isEntityId`, `typeof === 'string'`, `Number.isInteger`, op/`metadata`
+  checks) then narrow as before. No behavior change: the same guards, checks,
+  and return values, and the two files' guard style is identical.
+- **Resolution**: `const [...] = value as unknown[];` at sync.ts:131/146 and
+  snapshot.ts:52/67. Validation: eslint exits 0 in both packages (client still
+  has 1 pre-existing `explicit-module-boundary-types` warning in index.ts:262,
+  unrelated), `tsc --noEmit` clean, client 34 tests + devtools 74 tests green.
