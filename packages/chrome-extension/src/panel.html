@@ -48,6 +48,54 @@
 			max-height: calc(100vh - 120px);
 			overflow: auto;
 		}
+
+		#tab-bar {
+			display: flex;
+			gap: 6px;
+			margin-bottom: 12px;
+			border-bottom: 1px solid #cbd5e1;
+			padding-bottom: 8px;
+		}
+
+		#tab-bar .tab {
+			border: 1px solid #cbd5e1;
+			background: transparent;
+			color: #334155;
+			border-radius: 6px;
+			font-family: inherit;
+			font-size: 12px;
+		}
+
+		#tab-bar .tab.active {
+			background: #0f172a;
+			color: #f8fafc;
+			border-color: #0f172a;
+		}
+
+		#panel-content {
+			font-size: 12px;
+		}
+
+		textarea {
+			width: 100%;
+			box-sizing: border-box;
+			font-family: inherit;
+			font-size: 12px;
+			padding: 8px;
+			border: 1px solid #94a3b8;
+			border-radius: 6px;
+			background: #ffffff;
+			resize: vertical;
+		}
+
+		input[type="number"] {
+			font-family: inherit;
+			font-size: 12px;
+			padding: 4px 6px;
+			border: 1px solid #94a3b8;
+			border-radius: 6px;
+			background: #ffffff;
+		}
 	</style>
 </head>
 <body>
@@ -59,7 +107,14 @@
 		<div id="updated-at">last update: waiting for events</div>
 		<div id="event-type">latest event: none</div>
 	</div>
-	<pre id="payload">null</pre>
+	<nav id="tab-bar">
+		<button type="button" class="tab active" data-tab="facts">Facts</button>
+		<button type="button" class="tab" data-tab="entities">Entities</button>
+		<button type="button" class="tab" data-tab="timeline">Timeline</button>
+		<button type="button" class="tab" data-tab="diff">Diff</button>
+		<button type="button" class="tab" data-tab="query">Query</button>
+	</nav>
+	<div id="panel-content">waiting for snapshot</div>
 	<script src="panel-ui.global.js"></script>
 </body>
 </html>

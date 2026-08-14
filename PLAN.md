@@ -413,9 +413,9 @@ packages/
 ### Phase 4: DevTools
 
 - [x] Browser extension
-- Fact inspector UI
-- Query console
-- Timeline visualization
+- [x] Fact inspector UI
+- [x] Query console
+- [x] Timeline visualization
 
 ### Phase 5: Persistence
 

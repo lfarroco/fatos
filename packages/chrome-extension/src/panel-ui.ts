@@ -1,3 +1,16 @@
+import {
+	DevtoolsPanelController,
+	formatValue,
+	groupFactsByEntity,
+	renderDiff,
+	renderEntityView,
+	renderFactTable,
+	renderNotice,
+	renderQueryResults,
+	renderTimeline
+} from '@fatos/devtools';
+import type { DevtoolsTabId, FactSnapshot, QuerySpec } from '@fatos/devtools';
+
 type BridgeKind = 'snapshot' | 'event';
 
 type TabBridgeState = {
@@ -31,6 +44,24 @@ type ChromeLike = {
 		connect: (options: { name: string }) => RuntimePort;
 	};
 };
+
+const TABS: DevtoolsTabId[] = ['facts', 'entities', 'timeline', 'diff', 'query'];
+
+const controller = new DevtoolsPanelController();
+
+let selectedEntityIndex = 0;
+let diffConsole: {
+	root: HTMLElement;
+	txA: HTMLInputElement;
+	txB: HTMLInputElement;
+	results: HTMLElement;
+} | null = null;
+let queryConsole: {
+	root: HTMLElement;
+	input: HTMLTextAreaElement;
+	error: HTMLElement;
+	results: HTMLElement;
+} | null = null;
 
 function getChromeApi(): ChromeLike | undefined {
 	return (globalThis as { chrome?: ChromeLike }).chrome;
@@ -79,14 +110,257 @@ function setText(id: string, text: string): void {
 	element.textContent = text;
 }
 
+function appendNode(container: HTMLElement, node: HTMLElement | null): void {
+	if (node !== null) {
+		container.appendChild(node);
+	}
+}
+
 function renderState(state: TabBridgeState): void {
 	setText('status', `connected to ${state.url}`);
 	setText('updated-at', `last update: ${formatTimestamp(state.lastUpdated)}`);
 
 	const eventType = state.latestEvent ? state.latestEvent.kind : 'none';
 	setText('event-type', `latest event: ${eventType}`);
+}
 
-	setText('payload', JSON.stringify(state.latestEvent?.payload ?? null, null, 2));
+function updateTabBar(): void {
+	const active = controller.getActiveTab();
+	for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('#tab-bar .tab'))) {
+		const tab = button.dataset['tab'] as DevtoolsTabId | undefined;
+		button.classList.toggle('active', tab === active);
+	}
+}
+
+function renderFactsTab(content: HTMLElement): void {
+	appendNode(content, renderFactTable(controller.getFacts()));
+}
+
+function renderEntitiesTab(content: HTMLElement): void {
+	const facts = controller.getFacts();
+	const groups = groupFactsByEntity(facts);
+	const eids = [...groups.keys()];
+
+	if (eids.length === 0) {
+		appendNode(content, renderNotice('no entities yet'));
+		return;
+	}
+
+	selectedEntityIndex = Math.min(Math.max(selectedEntityIndex, 0), eids.length - 1);
+	const eid = eids[selectedEntityIndex];
+
+	const select = document.createElement('select');
+	select.style.cssText = 'font-family: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid #94a3b8; border-radius: 6px; background: #ffffff; margin-bottom: 10px;';
+	eids.forEach((entityId, index) => {
+		const option = document.createElement('option');
+		option.value = String(index);
+		option.textContent = `#${formatValue(entityId)} (${(groups.get(entityId)?.length ?? 0)} facts)`;
+		option.selected = index === selectedEntityIndex;
+		select.appendChild(option);
+	});
+	select.addEventListener('change', () => {
+		selectedEntityIndex = Number(select.value);
+		renderActiveTab();
+	});
+
+	content.appendChild(select);
+	appendNode(content, renderEntityView(facts, eid));
+}
+
+function renderTimelineTab(content: HTMLElement): void {
+	appendNode(content, renderTimeline(controller.getTransactions(), controller.getFacts()));
+}
+
+function renderDiffResult(container: HTMLElement): void {
+	container.textContent = '';
+	const diff = controller.getLastDiff();
+	if (diff === null) {
+		appendNode(container, renderNotice('pick a transaction range and press "Show Diff"'));
+		return;
+	}
+	appendNode(container, renderDiff(diff));
+}
+
+function getDiffConsole(): { root: HTMLElement; txA: HTMLInputElement; txB: HTMLInputElement; results: HTMLElement } {
+	if (diffConsole !== null) {
+		return diffConsole;
+	}
+
+	const root = document.createElement('div');
+	const row = document.createElement('div');
+	row.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px;';
+
+	const txA = document.createElement('input');
+	txA.type = 'number';
+	txA.min = '1';
+	txA.placeholder = 'txA';
+
+	const txB = document.createElement('input');
+	txB.type = 'number';
+	txB.min = '1';
+	txB.placeholder = 'txB';
+
+	const results = document.createElement('div');
+
+	const run = document.createElement('button');
+	run.type = 'button';
+	run.textContent = 'Show Diff';
+	run.addEventListener('click', () => {
+		const a = Number(txA.value);
+		const b = Number(txB.value);
+		if (!Number.isInteger(a) || !Number.isInteger(b) || a < 1 || b < 1) {
+			results.textContent = '';
+			appendNode(results, renderNotice('enter valid tx numbers'));
+			return;
+		}
+		controller.getDiff(a, b);
+		renderDiffResult(results);
+	});
+
+	row.appendChild(document.createTextNode('diff'));
+	row.appendChild(txA);
+	row.appendChild(document.createTextNode('→'));
+	row.appendChild(txB);
+	row.appendChild(run);
+
+	root.appendChild(row);
+	root.appendChild(results);
+
+	diffConsole = { root, txA, txB, results };
+	return diffConsole;
+}
+
+function renderDiffTab(content: HTMLElement): void {
+	const transactions = controller.getTransactions();
+	const console = getDiffConsole();
+
+	if (console.txA.value === '' && console.txB.value === '' && transactions.length >= 2) {
+		console.txA.value = String(transactions[transactions.length - 2][0]);
+		console.txB.value = String(transactions[transactions.length - 1][0]);
+		controller.getDiff(Number(console.txA.value), Number(console.txB.value));
+	}
+
+	renderDiffResult(console.results);
+	content.appendChild(console.root);
+}
+
+function getQueryConsole(): { root: HTMLElement; input: HTMLTextAreaElement; error: HTMLElement; results: HTMLElement } {
+	if (queryConsole !== null) {
+		return queryConsole;
+	}
+
+	const root = document.createElement('div');
+
+	const input = document.createElement('textarea');
+	input.rows = 5;
+	input.spellcheck = false;
+	input.value = JSON.stringify(
+		{
+			find: ['?e', '?name'],
+			where: [['?e', 'user/name', '?name']]
+		},
+		null,
+		2
+	);
+
+	const row = document.createElement('div');
+	row.style.cssText = 'display: flex; gap: 8px; margin: 8px 0;';
+
+	const error = document.createElement('div');
+	error.style.cssText = 'color: #b91c1c; font-size: 12px; margin-bottom: 8px; white-space: pre-wrap;';
+
+	const results = document.createElement('div');
+
+	const run = document.createElement('button');
+	run.type = 'button';
+	run.textContent = 'Run Query';
+	run.addEventListener('click', () => {
+		let spec: QuerySpec;
+		try {
+			spec = JSON.parse(input.value) as QuerySpec;
+		} catch {
+			error.textContent = 'invalid query JSON';
+			results.textContent = '';
+			return;
+		}
+
+		controller.runQuery(spec);
+		renderQueryResult(results);
+	});
+
+	row.appendChild(run);
+
+	root.appendChild(input);
+	root.appendChild(row);
+	root.appendChild(error);
+	root.appendChild(results);
+
+	queryConsole = { root, input, error, results };
+	return queryConsole;
+}
+
+function renderQueryResult(container: HTMLElement): void {
+	container.textContent = '';
+
+	const queryError = controller.getLastQueryError();
+	const consoleError = getQueryConsole().error;
+	consoleError.textContent = queryError ?? '';
+
+	const rows = controller.getLastQueryRows();
+	if (rows === null) {
+		return;
+	}
+
+	appendNode(container, renderQueryResults(rows, controller.getLastQuerySpec()?.find));
+}
+
+function renderQueryTab(content: HTMLElement): void {
+	const console = getQueryConsole();
+	renderQueryResult(console.results);
+	content.appendChild(console.root);
+}
+
+function renderActiveTab(): void {
+	const content = document.getElementById('panel-content');
+	if (!content) {
+		return;
+	}
+
+	content.textContent = '';
+
+	if (!controller.hasSnapshot()) {
+		appendNode(content, renderNotice(controller.getLastError() ?? 'waiting for snapshot'));
+		return;
+	}
+
+	switch (controller.getActiveTab()) {
+		case 'facts':
+			renderFactsTab(content);
+			break;
+		case 'entities':
+			renderEntitiesTab(content);
+			break;
+		case 'timeline':
+			renderTimelineTab(content);
+			break;
+		case 'diff':
+			renderDiffTab(content);
+			break;
+		case 'query':
+			renderQueryTab(content);
+			break;
+	}
+}
+
+function initTabBar(): void {
+	for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('#tab-bar .tab'))) {
+		button.addEventListener('click', () => {
+			const tab = button.dataset['tab'] as DevtoolsTabId | undefined;
+			if (tab !== undefined) {
+				controller.setActiveTab(tab);
+			}
+		});
+	}
 }
 
 function initPanelUi(): void {
@@ -102,6 +376,14 @@ function initPanelUi(): void {
 		return;
 	}
 
+	for (const tab of TABS) {
+		controller.setRenderCallback(tab, () => {
+			renderActiveTab();
+			updateTabBar();
+		});
+	}
+	initTabBar();
+
 	const port = chromeApi.runtime.connect({ name: 'fatos-devtools-panel' });
 
 	port.onMessage?.addListener((message: unknown) => {
@@ -110,6 +392,11 @@ function initPanelUi(): void {
 		}
 
 		renderState(message.state);
+
+		const latest = message.state.latestEvent;
+		if (latest?.kind === 'snapshot') {
+			controller.setSnapshot(latest.payload as FactSnapshot);
+		}
 	});
 
 	port.onDisconnect?.addListener(() => {
@@ -121,6 +408,8 @@ function initPanelUi(): void {
 		port.postMessage({ type: 'fatos:panel-request-inspect' });
 	});
 
+	renderActiveTab();
+	updateTabBar();
 	setText('status', 'connecting...');
 	port.postMessage({ type: 'fatos:panel-init', tabId });
 }

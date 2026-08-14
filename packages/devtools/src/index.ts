@@ -98,3 +98,33 @@ export function installInspectionRequestHandler(onInspectRequest: () => void): (
 		window.removeEventListener('message', listener);
 	};
 }
+
+export type { FactSnapshot } from './snapshot';
+export { isFactSnapshot } from './snapshot';
+
+export type { TimelineEntry, FactFilter } from './transforms';
+export {
+	computeDiff,
+	computeTimeline,
+	filterFacts,
+	formatValue,
+	groupFactsByEntity,
+	stableValueKey
+} from './transforms';
+
+export {
+	renderDiff,
+	renderEntityView,
+	renderFactTable,
+	renderNotice,
+	renderQueryResults,
+	renderTimeline
+} from './render';
+
+export { DevtoolsPanelController } from './controller';
+export type { DevtoolsRenderCallback, DevtoolsTabId } from './controller';
+
+export type { DiffResult } from '@fatos/core';
+export type { EntityId, Fact, FactDatabase, TransactionRecord } from '@fatos/client';
+export type { QuerySpec, QueryTerm } from '@fatos/client';
+

@@ -1,0 +1,184 @@
+/**
+ * `DevtoolsPanelController` — the framework-free core of the inspector panel
+ * (design/04 P4).
+ *
+ * Owns the current snapshot state and a Fatos client rebuilt from that
+ * snapshot (`createClient(createDatabase())` + `db.restore(...)`), so every
+ * read — facts, transactions, diffs, and the query console — runs against a
+ * real database that behaves exactly like the inspected app's. Tabs register
+ * render callbacks and are notified when state they depend on changes.
+ */
+
+import { createClient } from '@fatos/client';
+import type { FatosClient, Fact, QuerySpec, QueryTerm, TransactionRecord } from '@fatos/client';
+import { createDatabase, deserializeValue } from '@fatos/core';
+import type { DiffResult, FactDatabase } from '@fatos/core';
+import { isFactSnapshot } from './snapshot';
+import type { FactSnapshot } from './snapshot';
+
+export type DevtoolsTabId = 'facts' | 'entities' | 'timeline' | 'diff' | 'query';
+
+export type DevtoolsRenderCallback = (controller: DevtoolsPanelController) => void;
+
+/** Normalizes wire-tagged values (`$date` / `$bigint` / `$ref` / `$lookupRef`) back to engine values. */
+function normalizeSnapshot(snapshot: FactSnapshot): FactSnapshot {
+	return {
+		...snapshot,
+		facts: snapshot.facts.map(
+			(fact) => [fact[0], fact[1], deserializeValue(fact[2]), fact[3], fact[4]] as Fact
+		)
+	};
+}
+
+export class DevtoolsPanelController {
+	private snapshot: FactSnapshot | null = null;
+	private db: FactDatabase | null = null;
+	private client: FatosClient | null = null;
+	private activeTab: DevtoolsTabId = 'facts';
+	private lastDiff: DiffResult | null = null;
+	private lastQueryRows: QueryTerm[][] | null = null;
+	private lastQuerySpec: QuerySpec | null = null;
+	private lastQueryError: string | null = null;
+	private lastError: string | null = null;
+	private renderCallbacks = new Map<DevtoolsTabId, DevtoolsRenderCallback>();
+
+	/**
+	 * Replaces the current snapshot and rebuilds the client database from it.
+	 * Returns `false` (and records a `lastError`) when the payload is not a
+	 * valid `FactSnapshot` or `db.restore()` rejects it; the previous state is
+	 * kept in that case. Notifies every tab in both outcomes.
+	 */
+	setSnapshot(snapshot: FactSnapshot): boolean {
+		if (!isFactSnapshot(snapshot)) {
+			this.lastError = 'snapshot payload is not a valid FactSnapshot (expected { facts, transactions })';
+			this.notifyAll();
+			return false;
+		}
+
+		const db = createDatabase();
+		try {
+			db.restore(normalizeSnapshot(snapshot));
+		} catch (error) {
+			this.lastError = `snapshot rejected: ${error instanceof Error ? error.message : String(error)}`;
+			this.notifyAll();
+			return false;
+		}
+
+		this.snapshot = snapshot;
+		this.db = db;
+		this.client = createClient(db);
+		this.lastError = null;
+		this.lastDiff = null;
+		this.lastQueryRows = null;
+		this.lastQuerySpec = null;
+		this.lastQueryError = null;
+		this.notifyAll();
+		return true;
+	}
+
+	hasSnapshot(): boolean {
+		return this.client !== null;
+	}
+
+	getFacts(): readonly Fact[] {
+		return this.client?.getFacts() ?? [];
+	}
+
+	getTransactions(): readonly TransactionRecord[] {
+		return this.client?.getTransactions() ?? [];
+	}
+
+	getSnapshot(): FactSnapshot | null {
+		return this.snapshot;
+	}
+
+	/** Last error from `setSnapshot` (invalid payload / rejected restore), if any. */
+	getLastError(): string | null {
+		return this.lastError;
+	}
+
+	/**
+	 * Diffs the transactions `txA` and `txB` against the snapshot database
+	 * (wraps `FactDatabase.diff`). Returns `null` when no snapshot is loaded.
+	 */
+	getDiff(txA: number, txB: number): DiffResult | null {
+		if (this.db === null) {
+			this.lastDiff = null;
+			this.notify('diff');
+			return null;
+		}
+
+		this.lastDiff = this.db.diff(txA, txB);
+		this.notify('diff');
+		return this.lastDiff;
+	}
+
+	getLastDiff(): DiffResult | null {
+		return this.lastDiff;
+	}
+
+	/**
+	 * Runs a datalog query spec against the snapshot-built client (optionally
+	 * at a transaction `tx` for time travel). Stores the result/error and
+	 * notifies the query tab. Returns `null` when no snapshot is loaded or the
+	 * query throws.
+	 */
+	runQuery(spec: QuerySpec, tx?: number): QueryTerm[][] | null {
+		if (this.client === null) {
+			this.lastQueryRows = null;
+			this.lastQueryError = 'no snapshot loaded; nothing to query';
+			this.notify('query');
+			return null;
+		}
+
+		try {
+			const rows = tx === undefined ? this.client.query(spec) : this.client.query(spec, tx);
+			this.lastQuerySpec = spec;
+			this.lastQueryRows = rows;
+			this.lastQueryError = null;
+			this.notify('query');
+			return rows;
+		} catch (error) {
+			this.lastQueryRows = null;
+			this.lastQueryError = error instanceof Error ? error.message : String(error);
+			this.notify('query');
+			return null;
+		}
+	}
+
+	getLastQueryRows(): QueryTerm[][] | null {
+		return this.lastQueryRows;
+	}
+
+	getLastQuerySpec(): QuerySpec | null {
+		return this.lastQuerySpec;
+	}
+
+	getLastQueryError(): string | null {
+		return this.lastQueryError;
+	}
+
+	setActiveTab(tab: DevtoolsTabId): void {
+		this.activeTab = tab;
+		this.notify(tab);
+	}
+
+	getActiveTab(): DevtoolsTabId {
+		return this.activeTab;
+	}
+
+	/** Registers the re-render callback for a tab; called whenever that tab's state changes. */
+	setRenderCallback(tab: DevtoolsTabId, callback: DevtoolsRenderCallback): void {
+		this.renderCallbacks.set(tab, callback);
+	}
+
+	private notify(tab: DevtoolsTabId): void {
+		this.renderCallbacks.get(tab)?.(this);
+	}
+
+	private notifyAll(): void {
+		for (const tab of this.renderCallbacks.keys()) {
+			this.notify(tab);
+		}
+	}
+}

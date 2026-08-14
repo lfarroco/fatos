@@ -56,6 +56,30 @@ Format:
   (32 tests). Validation: core build/typecheck/tests green (124 tests),
   client/server typecheck + tests green, examples typecheck green.
 
+## [2026-08-14] devtools + chrome-extension — P4 inspector UI has no snapshot producer yet
+- **Task**: P4 DevTools inspector UI (fact table, entity view, timeline, diff,
+  query console) — docs/design/04-phasing.md P4
+- **Found by**: P4 inspector implementation (packages/devtools, packages/chrome-extension)
+- **Severity**: medium
+- **Status**: open
+- **Description**: The panel now validates bridge snapshot payloads against the
+  `FactSnapshot` contract defined in packages/devtools/src/snapshot.ts
+  (`{ facts, transactions, capturedAt?, url? }`, values may be engine values
+  or `$date`/`$bigint`/`$ref`/`$lookupRef` wire forms) and rebuilds a client
+  from them, but **nothing in the repo publishes one yet**: `content.ts`
+  relays page bridge payloads verbatim and no example/React wiring calls
+  `createBrowserDevtoolsBridge().publishSnapshot(...)` with a facts +
+  transactions payload. Until an inspected app publishes a valid
+  `FactSnapshot`, the panel degrades to "waiting for snapshot" (with the
+  controller's lastError shown when a malformed payload arrives). Follow-up:
+  wire a snapshot producer into an example app (e.g. publish
+  `{ facts: client.getFacts(), transactions: client.getTransactions() }` on
+  every committed transaction). Note: `@fatos/client` re-exports neither
+  `createDatabase` nor `deserializeValue`, so @fatos/devtools takes a direct
+  `@fatos/core` dependency for the controller's restore/replay path.
+- **Resolution**: pending; the controller + panel degrade gracefully in the
+  meantime (validated: devtools 35 tests, chrome-extension 2 tests).
+
 ## [2026-08-14] core — P1 transact & query surface (design/02) implemented
 - **Task**: P1 transact & query surface (docs/design/02-transact-and-query.md, docs/design/04-phasing.md P1)
 - **Found by**: P1 implementation (packages/core, packages/schema-designer)
