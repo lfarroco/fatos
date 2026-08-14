@@ -8,9 +8,11 @@ import { createEmptySchemaDesignerDocument } from './index';
 import type { SchemaDesignerDocument } from './index';
 
 /**
- * A small blog schema with two entities, a one-to-many relationship
- * (`post.authorId → user`), and data covering the supported value types:
- * string, date, bigint, string-many, and a ref attribute.
+ * A small blog schema with two entities and two relationships:
+ * - `post.authorId -> user` (one-to-many: many posts per user),
+ * - `user.postIds -> post` (a many-valued ref: one user authored many posts),
+ * plus data covering the supported value types: string, date, bigint,
+ * string-many, and both ref forms.
  */
 export function makeBlogDocument(): SchemaDesignerDocument {
 	const document = createEmptySchemaDesignerDocument('Blog');
@@ -24,7 +26,8 @@ export function makeBlogDocument(): SchemaDesignerDocument {
 				{ id: 'user:name', name: 'name', valueType: 'string', cardinality: 'one' },
 				{ id: 'user:born', name: 'born', valueType: 'date', cardinality: 'one' },
 				{ id: 'user:balance', name: 'balance', valueType: 'bigint', cardinality: 'one' },
-				{ id: 'user:tags', name: 'tags', valueType: 'string', cardinality: 'many' }
+				{ id: 'user:tags', name: 'tags', valueType: 'string', cardinality: 'many' },
+				{ id: 'user:postids', name: 'postIds', valueType: 'ref', cardinality: 'many' }
 			]
 		},
 		{
@@ -35,15 +38,26 @@ export function makeBlogDocument(): SchemaDesignerDocument {
 		}
 	);
 
-	document.schema.relationships.push({
-		id: 'post-author',
-		name: 'written by',
-		fromEntityId: 'post',
-		toEntityId: 'user',
-		fromCardinality: 'many',
-		toCardinality: 'one',
-		referenceAttributeName: 'authorId'
-	});
+	document.schema.relationships.push(
+		{
+			id: 'post-author',
+			name: 'written by',
+			fromEntityId: 'post',
+			toEntityId: 'user',
+			fromCardinality: 'many',
+			toCardinality: 'one',
+			referenceAttributeName: 'authorId'
+		},
+		{
+			id: 'user-posts',
+			name: 'authored posts',
+			fromEntityId: 'user',
+			toEntityId: 'post',
+			fromCardinality: 'one',
+			toCardinality: 'many',
+			referenceAttributeName: 'postIds'
+		}
+	);
 
 	document.entitiesData.push(
 		{
@@ -53,7 +67,8 @@ export function makeBlogDocument(): SchemaDesignerDocument {
 				name: 'Alice',
 				born: new Date('1990-01-02T03:04:05.000Z'),
 				balance: 10n,
-				tags: ['admin', 'early-adopter']
+				tags: ['admin', 'early-adopter'],
+				postIds: [20]
 			}
 		},
 		{

@@ -627,12 +627,18 @@ back to sub-agents for fixes.
     `{ version: 1, ... }` envelope so FileAdapter exports import into the
     panel. Values are tagged with the core wire tags (`$date`/`$bigint`/
     `$ref`/`$lookupRef`), so Date/bigint/ref values survive losslessly.
-  - **`toSchemaDesignerDocumentFromFatosSnapshot` does not reconstruct
-    relationships** (always emits `relationships: []`): a round-trip document
-    loses relationship names and from/to cardinalities — only the ref
-    attribute (`valueType: 'ref'`) survives on the source entity. The
-    round-trip fixture asserts the ref-attribute form and the limitation is
-    accepted (the Fatos snapshot format does not carry relationship metadata).
+  - **`toSchemaDesignerDocumentFromFatosSnapshot` now reconstructs
+    relationships** from ref schema declarations (`valueType: 'ref'` or
+    `db/ref` true): the target entity is resolved from stored ref values in
+    the entity data (branded `ref(id)` / `ref(lookupRef(...))` and wire
+    `$ref` forms), with a ref-name heuristic fallback (`authorId` -> entity
+    `author`). Exactness limits: the snapshot does not carry user-authored
+    relationship names or the source-side multiplicity, so the name is
+    synthesized as `<source> -> <target>` and `fromCardinality` defaults to
+    `'one'`; `toCardinality` is exact (it equals the ref attribute's
+    cardinality, which is how `toFatosTransactionEntries` encodes it);
+    self-references are skipped to match the designer model. The ref
+    attribute itself still also survives on the source entity.
   - **The converter passes entity attribute values through verbatim**, so a
     wire-form snapshot (e.g. a devtools export) imported into the schema
     designer would surface `{ $date }`/`{ $bigint }`/`{ $ref }` objects in
@@ -649,4 +655,10 @@ back to sub-agents for fixes.
   persistence: serialization.test.ts (+3, 32 total). Validation: devtools
   build + typecheck + 55 tests green; chrome-extension build + typecheck + 2
   tests green; schema-designer typecheck + 19 tests green; persistence
-  typecheck + 32 tests green; core 212 tests green (unchanged).
+  typecheck + 32 tests green; core 212 tests green (unchanged). Follow-up
+  (this task): the converter now reconstructs relationships (targets resolved
+  from data/lookupRef/wire `$ref` with a ref-name heuristic fallback), the
+  round-trip fixture grew to two relationships (one-to-many + a many-valued
+  ref), and tests assert reference attributes, synthesized names, exact
+  `toCardinality`, and defaulted `fromCardinality`; schema-designer build +
+  typecheck + 20 tests green.

@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createDatabase, ref, serializeValue } from '@fatos/core';
+import { createDatabase, lookupRef, ref, serializeValue } from '@fatos/core';
 import {
 	addAttribute,
 	addEntity,
@@ -142,8 +142,59 @@ describe('@fatos/schema-designer', () => {
 		});
 
 		expect(document.schema.entities.map((entity) => entity.name)).toEqual(['org', 'user']);
+		expect(document.schema.relationships).toEqual([]);
 		expect(document.entitiesData).toHaveLength(2);
 		expect(document.entitiesData[0]?.attributes).toBeDefined();
+	});
+
+	it('reconstructs relationships from ref schemas using data, lookupRefs, and ref-name heuristics', () => {
+		const document = toSchemaDesignerDocumentFromFatosSnapshot({
+			schemas: [
+				{ eid: -1, ident: 'post/title', valueType: 'string', cardinality: 'one' },
+				{ eid: -2, ident: 'post/authorId', valueType: 'ref', cardinality: 'one' },
+				{ eid: -3, ident: 'user/name', valueType: 'string', cardinality: 'one' },
+				{ eid: -4, ident: 'user/slug', valueType: 'string', cardinality: 'one', unique: 'identity' },
+				{ eid: -5, ident: 'owner/name', valueType: 'string', cardinality: 'one' },
+				{ eid: -6, ident: 'org/ownerId', valueType: 'unknown', cardinality: 'one', ref: true }
+			],
+			entities: [
+				{ id: 10, 'user/name': 'Alice', 'user/slug': 'alice' },
+				{ id: 20, 'post/title': 'Hello', 'post/authorId': ref(lookupRef(['user/slug', 'alice'])) },
+				{ id: 30, 'owner/name': 'Acme' }
+			]
+		});
+
+		const relationshipsByFrom = new Map(
+			document.schema.relationships.map((relationship) => [relationship.fromEntityId, relationship])
+		);
+		expect(document.schema.relationships).toHaveLength(2);
+
+		// The ref attribute still survives as an entity attribute.
+		expect(document.schema.entities.find((entity) => entity.name === 'post')?.attributes).toContainEqual({
+			id: 'post:authorid',
+			name: 'authorId',
+			valueType: 'ref',
+			cardinality: 'one'
+		});
+
+		// Target resolved through the stored lookupRef -> unique user/slug row.
+		expect(relationshipsByFrom.get('post')).toMatchObject({
+			fromEntityId: 'post',
+			toEntityId: 'user',
+			fromCardinality: 'one',
+			toCardinality: 'one',
+			referenceAttributeName: 'authorId'
+		});
+
+		// No data for org/ownerId: the target is derived from the ref name, and
+		// `db/ref` true (without valueType 'ref') still triggers reconstruction.
+		expect(relationshipsByFrom.get('org')).toMatchObject({
+			fromEntityId: 'org',
+			toEntityId: 'owner',
+			fromCardinality: 'one',
+			toCardinality: 'one',
+			referenceAttributeName: 'ownerId'
+		});
 	});
 
 	it('round-trips a document through a core database snapshot (Phase 7 fixture)', () => {
@@ -173,7 +224,8 @@ describe('@fatos/schema-designer', () => {
 				{ id: 'user:name', name: 'name', valueType: 'string', cardinality: 'one' },
 				{ id: 'user:born', name: 'born', valueType: 'date', cardinality: 'one' },
 				{ id: 'user:balance', name: 'balance', valueType: 'bigint', cardinality: 'one' },
-				{ id: 'user:tags', name: 'tags', valueType: 'string', cardinality: 'many' }
+				{ id: 'user:tags', name: 'tags', valueType: 'string', cardinality: 'many' },
+				{ id: 'user:postids', name: 'postIds', valueType: 'ref', cardinality: 'many' }
 			])
 		);
 
@@ -187,6 +239,36 @@ describe('@fatos/schema-designer', () => {
 			cardinality: 'one'
 		});
 
+		// Ref schemas are also reconstructed as relationships. The snapshot
+		// does not store user-authored relationship names or the source-side
+		// multiplicity, so the name is synthesized (`<source> -> <target>`)
+		// and fromCardinality defaults to 'one'; referenceAttributeName and
+		// toCardinality (encoded in the ref attribute's cardinality) survive
+		// exactly.
+		const relationshipsByFrom = new Map(
+			imported.schema.relationships.map((relationship) => [relationship.fromEntityId, relationship])
+		);
+		expect(imported.schema.relationships).toHaveLength(2);
+
+		expect(relationshipsByFrom.get('post')).toMatchObject({
+			id: 'post-user',
+			name: 'post -> user',
+			fromEntityId: 'post',
+			toEntityId: 'user',
+			fromCardinality: 'one',
+			toCardinality: 'one',
+			referenceAttributeName: 'authorId'
+		});
+
+		expect(relationshipsByFrom.get('user')).toMatchObject({
+			id: 'user-post',
+			fromEntityId: 'user',
+			toEntityId: 'post',
+			fromCardinality: 'one',
+			toCardinality: 'many',
+			referenceAttributeName: 'postIds'
+		});
+
 		// Data attributes survive for the supported value types.
 		const alice = imported.entitiesData.find((row) => row.eid === 10);
 		expect(alice).toBeDefined();
@@ -196,6 +278,10 @@ describe('@fatos/schema-designer', () => {
 		});
 		expect(serializeValue(alice?.attributes['balance'])).toEqual({ $bigint: '10' });
 		expect(alice?.attributes['tags']).toEqual(['admin', 'early-adopter']);
+
+		const alicePostIds = alice?.attributes['postIds'] as unknown[] | undefined;
+		expect(alicePostIds).toHaveLength(1);
+		expect(serializeValue(alicePostIds?.[0])).toEqual({ $ref: 20 });
 
 		const hello = imported.entitiesData.find((row) => row.eid === 20);
 		expect(hello).toBeDefined();

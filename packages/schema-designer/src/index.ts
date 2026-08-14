@@ -4,7 +4,7 @@
  * Shared model, validation, and adapter helpers for a visual schema designer.
  */
 
-import { ref, type EntityId } from '@fatos/core';
+import { isLookupRef, isRef, isTemp, LOOKUP_REF_BRAND, REF_BRAND, ref, type EntityId } from '@fatos/core';
 import { defaultReferenceAttributeName } from './editor';
 
 export const version = '0.0.1';
@@ -17,6 +17,8 @@ export type SchemaInfo = {
 	ident: string;
 	valueType: ValueType;
 	cardinality: Cardinality;
+	unique?: 'identity' | 'value';
+	ref?: boolean;
 };
 
 export type Mutation = readonly [
@@ -280,8 +282,194 @@ export function exportSchemaDesignerDocument(document: SchemaDesignerDocument): 
 	return JSON.stringify(document, null, 2);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function ownerEntityName(row: Record<string, unknown>): string {
+	const keys = Object.keys(row).filter((key) => key.includes('/'));
+	return keys[0]?.split('/')[0] ?? 'entity';
+}
+
+function lookupRefTargetId(
+	pair: readonly [string, unknown],
+	rows: Array<Record<string, unknown> & { id: number }>
+): EntityId | null {
+	const [attribute, scalar] = pair;
+	const row = rows.find((candidate) => candidate[attribute] === scalar);
+	return row ? row.id : null;
+}
+
+/**
+ * Extracts the entity id a stored ref value points at, or null when the value
+ * is not a resolvable reference. Handles branded engine refs (`ref(id)` and
+ * `ref(lookupRef(...))`), wire-form `$ref` objects, and cardinality-many
+ * arrays of refs.
+ */
+function refTargetId(value: unknown, rows: Array<Record<string, unknown> & { id: number }>): EntityId | null {
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const resolved = refTargetId(item, rows);
+			if (resolved !== null) {
+				return resolved;
+			}
+		}
+		return null;
+	}
+
+	if (isRef(value)) {
+		const target = value[REF_BRAND];
+		if (isTemp(target)) {
+			return null;
+		}
+		if (isLookupRef(target)) {
+			return lookupRefTargetId(target[LOOKUP_REF_BRAND], rows);
+		}
+		return target;
+	}
+
+	if (isPlainRecord(value) && '$ref' in value) {
+		const target = value['$ref'];
+		if (isPlainRecord(target) && '$lookupRef' in target) {
+			const pair = target['$lookupRef'];
+			if (Array.isArray(pair) && pair.length === 2) {
+				return lookupRefTargetId(pair as unknown as readonly [string, unknown], rows);
+			}
+			return null;
+		}
+		return typeof target === 'number' || typeof target === 'string' ? target : null;
+	}
+
+	return null;
+}
+
+/**
+ * Fallback for ref schemas without (resolvable) data: derives a candidate
+ * target entity name from the ref attribute name (`authorId` -> `author`,
+ * `blogPostId` -> `blog post`) and matches it against the declared entities
+ * by stable id.
+ */
+function matchEntityNameFromRefName(refName: string, entityNames: string[]): string | null {
+	const candidate = refName
+		.replace(/Id$/, '')
+		.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+		.toLowerCase();
+	const candidateId = stableEntityId(candidate);
+	return entityNames.find((name) => stableEntityId(name) === candidateId) ?? null;
+}
+
+/**
+ * Resolves the target entity of a ref attribute: first from stored ref values
+ * in the entity data (the target row's owner entity), falling back to the
+ * ref-name heuristic when there is no (resolvable) data.
+ */
+function resolveRelationshipTargetEntityName(
+	ident: string,
+	refName: string,
+	rows: Array<Record<string, unknown> & { id: number }>,
+	entityNames: string[]
+): string | null {
+	for (const row of rows) {
+		const targetId = refTargetId(row[ident], rows);
+		if (targetId === null) {
+			continue;
+		}
+
+		const targetRow = rows.find((candidate) => candidate.id === targetId);
+		if (!targetRow) {
+			continue;
+		}
+
+		const ownerName = ownerEntityName(targetRow);
+		if (entityNames.includes(ownerName)) {
+			return ownerName;
+		}
+	}
+
+	return matchEntityNameFromRefName(refName, entityNames);
+}
+
+/**
+ * Reconstructs designer relationships from Fatos ref schema declarations
+ * (`valueType: 'ref'` or `db/ref` true). The ref attribute's cardinality is
+ * the relationship's `toCardinality` (that is how `toFatosTransactionEntries`
+ * encodes it); `fromCardinality` is not stored in the snapshot and defaults
+ * to 'one'. Relationship names are synthesized because the snapshot does not
+ * carry user-authored names.
+ */
+function reconstructRelationships(
+	schemas: SchemaInfo[],
+	entities: Array<Record<string, unknown> & { id: number }>,
+	entityList: SchemaDesignerEntity[],
+	entityIdByName: Map<string, string>
+): SchemaDesignerRelationship[] {
+	const entityNames = entityList.map((entity) => entity.name);
+	const relationships: SchemaDesignerRelationship[] = [];
+	const usedRelationshipIds = new Set<string>();
+
+	for (const schema of schemas) {
+		if (schema.valueType !== 'ref' && schema.ref !== true) {
+			continue;
+		}
+
+		const [entityName, ...attributeSegments] = schema.ident.split('/');
+		if (!entityName || attributeSegments.length === 0) {
+			continue;
+		}
+
+		const refName = attributeSegments.join('/');
+		const fromEntityId = stableEntityId(entityName);
+		if (!entityIdByName.has(entityName)) {
+			continue;
+		}
+
+		const targetEntityName = resolveRelationshipTargetEntityName(schema.ident, refName, entities, entityNames);
+		if (!targetEntityName) {
+			continue;
+		}
+
+		const toEntityId = entityIdByName.get(targetEntityName);
+		if (!toEntityId || fromEntityId === toEntityId) {
+			continue;
+		}
+
+		const alreadyReconstructed = relationships.some(
+			(relationship) =>
+				relationship.fromEntityId === fromEntityId && relationship.referenceAttributeName === refName
+		);
+		if (alreadyReconstructed) {
+			continue;
+		}
+
+		const baseId = `${fromEntityId}-${toEntityId}`;
+		let id = baseId;
+		let ordinal = 2;
+		while (usedRelationshipIds.has(id)) {
+			id = `${baseId}-${ordinal}`;
+			ordinal += 1;
+		}
+		usedRelationshipIds.add(id);
+
+		relationships.push({
+			id,
+			name: `${entityName} -> ${targetEntityName}`,
+			fromEntityId,
+			toEntityId,
+			fromCardinality: 'one',
+			toCardinality: schema.cardinality === 'many' ? 'many' : 'one',
+			referenceAttributeName: refName
+		});
+	}
+
+	return relationships.sort(
+		(left, right) =>
+			left.fromEntityId.localeCompare(right.fromEntityId) ||
+			(left.referenceAttributeName ?? '').localeCompare(right.referenceAttributeName ?? '')
+	);
+}
+
 export function toSchemaDesignerDocumentFromFatosSnapshot(snapshot: FatosJsonSnapshot): SchemaDesignerDocument {
-	const schemas = snapshot.schemas ?? [];
+	const schemas = [...(snapshot.schemas ?? [])].sort((left, right) => left.ident.localeCompare(right.ident));
 	const entities = snapshot.entities ?? [];
 	const byEntityName = new Map<string, SchemaDesignerEntity>();
 
@@ -312,6 +500,7 @@ export function toSchemaDesignerDocumentFromFatosSnapshot(snapshot: FatosJsonSna
 
 	const entityList = [...byEntityName.values()].sort((left, right) => left.name.localeCompare(right.name));
 	const entityIdByName = new Map(entityList.map((entity) => [entity.name, entity.id]));
+	const relationships = reconstructRelationships(schemas, entities, entityList, entityIdByName);
 
 	const entitiesData: SchemaDesignerEntityData[] = entities
 		.map((entity) => {
@@ -343,7 +532,7 @@ export function toSchemaDesignerDocumentFromFatosSnapshot(snapshot: FatosJsonSna
 		schema: {
 			name: 'Imported Fatos Snapshot',
 			entities: entityList,
-			relationships: []
+			relationships
 		},
 		entitiesData,
 		view: {
