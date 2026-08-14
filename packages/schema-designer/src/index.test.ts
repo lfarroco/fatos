@@ -3,6 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { ref } from '@fatos/core';
 import {
 	addAttribute,
 	addEntity,
@@ -114,11 +115,11 @@ describe('@fatos/schema-designer', () => {
 		expect(entries).toContainEqual({ ident: 'user/name', valueType: 'string', cardinality: 'one' });
 		expect(entries).toContainEqual({ ident: 'user/tags', valueType: 'string', cardinality: 'many' });
 		expect(entries).toContainEqual({ ident: 'org/name', valueType: 'string', cardinality: 'one' });
-		expect(entries).toContainEqual({ ident: 'user/orgId', valueType: 'number', cardinality: 'one' });
+		expect(entries).toContainEqual({ ident: 'user/orgId', valueType: 'ref', cardinality: 'one' });
 		expect(entries).toContainEqual(['add', 10, 'user/name', 'Alice']);
 		expect(entries).toContainEqual(['add', 10, 'user/tags', 'admin']);
 		expect(entries).toContainEqual(['add', 10, 'user/tags', 'early-adopter']);
-		expect(entries).toContainEqual(['add', 10, 'user/orgId', 200]);
+		expect(entries).toContainEqual(['add', 10, 'user/orgId', ref(200)]);
 	});
 
 	it('imports schemas and entities from a Fatos snapshot shape', () => {

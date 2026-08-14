@@ -56,6 +56,71 @@ Format:
   (32 tests). Validation: core build/typecheck/tests green (124 tests),
   client/server typecheck + tests green, examples typecheck green.
 
+## [2026-08-14] core — P1 transact & query surface (design/02) implemented
+- **Task**: P1 transact & query surface (docs/design/02-transact-and-query.md, docs/design/04-phasing.md P1)
+- **Found by**: P1 implementation (packages/core, packages/schema-designer)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Landed `db.insert`/`db.upsert` (object maps, deterministic
+  depth-first/parent-major nested graph flattening, array expansion,
+  `db/unique: 'identity'` upsert + lookupRef resolution), `db.set`/`db.patch`
+  (diff-based retract+add in one transaction), find operators
+  (`$eq $ne $gt $gte $lt $lte $in $nin $exists $contains`) with
+  `orderBy / limit / offset / select`, `db.pull` dot-paths, `db.at` /
+  `db.atTransaction` / `db.diff`, datalog operator clauses +
+  Date/BigInt/ref constants with per-clause candidate sets, and a
+  commit-maintained unique index. The deferred P0 items are resolved:
+  - **Array expansion** (was: arrays kept verbatim): `insert` expands arrays
+    into cardinality-many facts, auto-declaring `cardinality: 'many'` schema
+    and rejecting arrays on cardinality-one attributes. The `add`/`transact`
+    tuple surface still stores arrays verbatim (pinned by entity.test.ts).
+  - **lookupRef upsert resolution** (was: stored as-is): `insert`/`upsert`
+    resolve lookupRef values against `db/unique: 'identity'` holders into
+    `ref()` (raising when unresolvable), and identity attributes match
+    existing entities (plain value or lookupRef; `db/unique: 'value'`
+    duplicates still raise). `add`/`transact` still store lookupRef as-is
+    (pinned by values.test.ts).
+  - **Datalog query constants** (was: QueryTerm-only): `QueryClause` value
+    terms now accept find operator objects and Date/BigInt/ref/lookupRef
+    constants; one-valued matching uses the canonical value key for
+    non-QueryTerm constants (equal-ms Dates / same-target refs match).
+    Variables still bind only QueryTerm values into result rows, so
+    non-QueryTerm values participate as constants but cannot be projected
+    (rows stay `QueryTerm[][]`).
+  - **Unique-index optimization** (was: O(entities × facts) per unique attr):
+    `uniqueIndex` (attribute → valueKey → holder ids) is maintained at commit
+    and serves `db/unique: 'value'` enforcement + identity upsert lookups;
+    lazily scan-backfilled when a unique constraint is added to pre-existing
+    facts (schema is data). Defensive copies keep a failed transaction from
+    mutating the committed index.
+  - **Cross-variable datalog joins** (separate entry below): per-clause
+    candidate sets — an unbound entity variable ranges over its own clause's
+    candidates in global first-fact order.
+- **New limitations / behaviors recorded**:
+  - Same-tx retract-then-re-add of an existing cardinality-one value used to
+    raise a false "Cardinality conflict" (validateMutations re-read the
+    committed value after the retract); per-transaction retraction tracking
+    (`oneRetracted`) now makes `set`/`patch` diff updates work.
+  - Find/query operators match ANY member of cardinality-many attributes
+    (e.g. `$ne` matches an entity when any member differs); `$exists`
+    distinguishes null from missing; bare values are `$eq`.
+  - `find` criteria values must be scalars or operator objects; plain objects
+    throw "Unknown find operator".
+  - `pull` path grammar: at each level the longest segment prefix joined with
+    '/' names the attribute (so `user.name` reads `user/name`); terminal ref
+    attributes return `{ id }`; many-valued refs yield arrays; multiple paths
+    deep-merge.
+  - Schema-designer relationships now declare `valueType: 'ref'` (not
+    'number') and wrap data mutations in `ref(...)`; the package gained a
+    dependency on `@fatos/core`.
+- **Resolution**: core/src/index.ts (insert/upsert/set/patch/pull/at/diff,
+  operators, per-clause query joins, unique index) + new
+  transact-query.test.ts (42 tests); schema-designer/src/index.ts + tests.
+  Validation: core build/typecheck/tests green (167), schema-designer
+  typecheck + tests green (10), client/server/react/examples typecheck +
+  tests green, benchmark targets met (single-clause best ~5.8 ms avg ~8 ms,
+  2-clause join best ~15 ms, find ~1.7 ms).
+
 ## [2026-08-14] core — existing-test expectation updates for the new value rules
 - **Task**: P0 value model (packages/core)
 - **Found by**: P0 value model implementation
@@ -106,7 +171,7 @@ Format:
 - **Task**: P0 query engine (fast-path rewrite, `npm run benchmark`)
 - **Found by**: query engine optimization work (packages/core)
 - **Severity**: low
-- **Status**: open
+- **Status**: fixed
 - **Description**: `candidateEidsForQuery` intersects every clause's eid set,
   and the engine iterates that intersection for any clause whose entity
   variable is not yet bound. For a join on two *different* entity variables
@@ -115,8 +180,14 @@ Format:
   its own clause — narrower than textbook datalog semantics. Preserved
   deliberately for identical observable behavior (pinned in
   query.test.ts "joins two distinct entity variables in candidate order").
-  Fixing it (per-clause candidate sets) would change result sets/ordering and
-  is out of scope for the P0 optimization.
+- **Resolution**: P1 rewrote the join to use per-clause candidate sets
+  (`candidateEidsForClause`): an unbound entity variable ranges over the
+  entities matching ITS OWN clause, ordered by global first-fact order, so
+  result ordering stays deterministic. Same-entity-variable joins keep the
+  per-binding EAVT fast path (no benchmark regression). Pinned test updated
+  and extended with a case where the per-clause sets differ
+  ("does not narrow distinct entity variables to the shared candidate
+  intersection").
 
 ## [2026-08-13] repo — `npm run types` fails at root (missing scripts)
 - **Task**: P0 hygiene (docs/design/04-phasing.md P0)

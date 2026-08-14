@@ -35,7 +35,9 @@
 	],
 	"author": "",
 	"license": "MIT",
-	"dependencies": {},
+	"dependencies": {
+		"@fatos/core": "file:../core"
+	},
 	"peerDependencies": {
 		"react": ">=18.0.0"
 	},

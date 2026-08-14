@@ -4,6 +4,8 @@
  * Shared model, validation, and adapter helpers for a visual schema designer.
  */
 
+import { ref, type EntityId } from '@fatos/core';
+
 export const version = '0.0.1';
 
 export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'date' | 'bigint' | 'ref' | 'unknown';
@@ -354,15 +356,15 @@ function toAttributeIdent(entityName: string, attributeName: string): string {
 	return `${entityName}/${attributeName}`;
 }
 
-function pushMutation(entries: TransactionEntry[], eid: number, ident: string, value: unknown): void {
+function pushMutation(entries: TransactionEntry[], eid: number, ident: string, value: unknown, isRefAttribute: boolean): void {
 	if (Array.isArray(value)) {
 		for (const item of value) {
-			entries.push(['add', eid, ident, item]);
+			entries.push(['add', eid, ident, isRefAttribute ? ref(item as EntityId) : item]);
 		}
 		return;
 	}
 
-	entries.push(['add', eid, ident, value]);
+	entries.push(['add', eid, ident, isRefAttribute ? ref(value as EntityId) : value]);
 }
 
 export function toFatosTransactionEntries(document: SchemaDesignerDocument): TransactionEntry[] {
@@ -374,6 +376,7 @@ export function toFatosTransactionEntries(document: SchemaDesignerDocument): Tra
 	const entries: TransactionEntry[] = [];
 	const entityById = new Map(document.schema.entities.map((entity) => [entity.id, entity]));
 	const schemaIdents = new Set<string>();
+	const refIdents = new Set<string>();
 
 	for (const entity of document.schema.entities) {
 		for (const attribute of entity.attributes) {
@@ -400,11 +403,12 @@ export function toFatosTransactionEntries(document: SchemaDesignerDocument): Tra
 
 		const referenceName = relationship.referenceAttributeName ?? `${targetEntity.name}Id`;
 		const ident = toAttributeIdent(sourceEntity.name, referenceName);
+		refIdents.add(ident);
 		if (!schemaIdents.has(ident)) {
 			schemaIdents.add(ident);
 			entries.push({
 				ident,
-				valueType: 'number',
+				valueType: 'ref',
 				cardinality: relationship.toCardinality === 'many' ? 'many' : 'one'
 			});
 		}
@@ -418,7 +422,7 @@ export function toFatosTransactionEntries(document: SchemaDesignerDocument): Tra
 
 		for (const [attributeName, value] of Object.entries(row.attributes)) {
 			const ident = toAttributeIdent(entity.name, attributeName);
-			pushMutation(entries, row.eid, ident, value);
+			pushMutation(entries, row.eid, ident, value, refIdents.has(ident));
 		}
 	}
 

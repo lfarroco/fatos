@@ -111,7 +111,53 @@ export type SchemaInfo = {
 };
 
 export type QueryTerm = string | number | boolean | null;
-export type QueryClause = readonly [entity: QueryTerm, attribute: string, value: QueryTerm];
+
+/**
+ * Mango-style find operators (design/02). Multiple keys on one object AND
+ * together; for cardinality-many attributes each operator matches against any
+ * member of the attribute's value set.
+ */
+export type FindOperator = {
+	$eq?: unknown;
+	$ne?: unknown;
+	$gt?: unknown;
+	$gte?: unknown;
+	$lt?: unknown;
+	$lte?: unknown;
+	$in?: unknown[];
+	$nin?: unknown[];
+	$exists?: boolean;
+	$contains?: unknown;
+};
+
+export type OrderDirection = 'asc' | 'desc';
+export type OrderBy = readonly [attribute: string, direction: OrderDirection];
+
+export type FindOptions = {
+	tx?: number;
+	orderBy?: OrderBy | OrderBy[];
+	limit?: number;
+	offset?: number;
+	select?: string[];
+};
+
+/** A plain attribute map accepted by `insert`/`upsert`; `id` is optional. */
+export type InsertMap = Record<string, unknown>;
+
+/** Whitespace-separated dot-paths or an explicit string array (design/02 pull). */
+export type PullPath = string | string[];
+
+export type DiffResult = {
+	added: Fact[];
+	retracted: Fact[];
+};
+
+/**
+ * A clause value may be a scalar term (bare value = $eq), a `find` operator
+ * object, or a non-QueryTerm constant (Date / bigint / ref / lookupRef).
+ */
+export type QueryValueTerm = QueryTerm | FindOperator | Date | bigint | Ref | LookupRef;
+export type QueryClause = readonly [entity: QueryTerm, attribute: string, value: QueryValueTerm];
 export type QuerySpec = {
 	find: string[];
 	where: QueryClause[];
@@ -243,6 +289,260 @@ function sameValue(left: unknown, right: unknown): boolean {
 	return valueKey(left) === valueKey(right);
 }
 
+const FIND_OPERATOR_KEYS = new Set([
+	'$eq',
+	'$ne',
+	'$gt',
+	'$gte',
+	'$lt',
+	'$lte',
+	'$in',
+	'$nin',
+	'$exists',
+	'$contains'
+]);
+
+/**
+ * True when `value` is a find-operator object. Plain objects with non-operator
+ * keys are rejected — opaque objects are not values (design/01).
+ */
+function isFindOperator(value: unknown): value is FindOperator {
+	if (typeof value !== 'object' || value === null || Array.isArray(value) || value instanceof Date) {
+		return false;
+	}
+
+	if (isRef(value) || isTemp(value) || isLookupRef(value)) {
+		return false;
+	}
+
+	const keys = Object.keys(value);
+	if (keys.length === 0) {
+		return false;
+	}
+
+	for (const key of keys) {
+		if (!FIND_OPERATOR_KEYS.has(key)) {
+			throw new Error(`Unknown find operator "${key}" in criteria ${JSON.stringify(value)}`);
+		}
+	}
+
+	return true;
+}
+
+/** Total deterministic rank used by comparison operators and orderBy. */
+function valueRank(value: unknown): number {
+	if (value === undefined) {
+		return -1;
+	}
+
+	if (value === null) {
+		return 0;
+	}
+
+	if (typeof value === 'boolean') {
+		return 1;
+	}
+
+	if (typeof value === 'number') {
+		return 2;
+	}
+
+	if (typeof value === 'string') {
+		return 3;
+	}
+
+	if (value instanceof Date) {
+		return 4;
+	}
+
+	if (typeof value === 'bigint') {
+		return 5;
+	}
+
+	if (isRef(value) || isLookupRef(value)) {
+		return 6;
+	}
+
+	return 7;
+}
+
+/**
+ * Total order over supported values (null < boolean < number < string <
+ * Date < bigint < ref), used by $gt/$gte/$lt/$lte and orderBy. Returns null
+ * for values outside the supported model (never committed by the engine).
+ */
+function compareValues(left: unknown, right: unknown): number | null {
+	if ((typeof left === 'number' && Number.isNaN(left)) || (typeof right === 'number' && Number.isNaN(right))) {
+		return null;
+	}
+
+	const leftRank = valueRank(left);
+	const rightRank = valueRank(right);
+	if (leftRank !== rightRank) {
+		return leftRank < rightRank ? -1 : 1;
+	}
+
+	switch (leftRank) {
+		case -1:
+		case 0:
+			return 0;
+		case 1:
+			return left === right ? 0 : left ? 1 : -1;
+		case 2:
+			return (left as number) < (right as number) ? -1 : (left as number) > (right as number) ? 1 : 0;
+		case 3:
+			return (left as string) < (right as string) ? -1 : (left as string) > (right as string) ? 1 : 0;
+		case 4:
+			return (left as Date).getTime() < (right as Date).getTime()
+				? -1
+				: (left as Date).getTime() > (right as Date).getTime()
+					? 1
+					: 0;
+		case 5:
+			return (left as bigint) < (right as bigint) ? -1 : (left as bigint) > (right as bigint) ? 1 : 0;
+		case 6:
+			return refTargetKey((left as Ref)[REF_BRAND]) < refTargetKey((right as Ref)[REF_BRAND])
+				? -1
+				: refTargetKey((left as Ref)[REF_BRAND]) > refTargetKey((right as Ref)[REF_BRAND])
+					? 1
+					: 0;
+		default:
+			return null;
+	}
+}
+
+/**
+ * Evaluates one criterion against the attribute's active values. Bare values
+ * are $eq; operators match if ANY member satisfies them (cardinality-many
+ * aware, fixing the P0 array-find limitation).
+ */
+function criterionMatchesValue(values: unknown[], criterion: unknown): boolean {
+	if (isFindOperator(criterion)) {
+		return Object.entries(criterion).every(([op, operand]) => operatorMatchesValue(values, op, operand));
+	}
+
+	return values.some((value) => sameValue(value, criterion));
+}
+
+function operatorMatchesValue(values: unknown[], op: string, operand: unknown): boolean {
+	switch (op) {
+		case '$eq':
+			return values.some((value) => sameValue(value, operand));
+		case '$ne':
+			return values.some((value) => !sameValue(value, operand));
+		case '$gt':
+			return values.some((value) => {
+				const cmp = compareValues(value, operand);
+				return cmp !== null && cmp > 0;
+			});
+		case '$gte':
+			return values.some((value) => {
+				const cmp = compareValues(value, operand);
+				return cmp !== null && cmp >= 0;
+			});
+		case '$lt':
+			return values.some((value) => {
+				const cmp = compareValues(value, operand);
+				return cmp !== null && cmp < 0;
+			});
+		case '$lte':
+			return values.some((value) => {
+				const cmp = compareValues(value, operand);
+				return cmp !== null && cmp <= 0;
+			});
+		case '$in':
+			return (
+				Array.isArray(operand) &&
+				values.some((value) => operand.some((item) => sameValue(value, item)))
+			);
+		case '$nin':
+			return (
+				Array.isArray(operand) &&
+				values.some((value) => !operand.some((item) => sameValue(value, item)))
+			);
+		case '$exists':
+			return operand ? values.length > 0 : values.length === 0;
+		case '$contains':
+			return values.some((value) => sameValue(value, operand));
+		default:
+			throw new Error(`Unknown find operator: ${op}`);
+	}
+}
+
+/** orderBy comparison: a missing attribute sorts before every present value. */
+function compareOrderValues(left: unknown, right: unknown): number {
+	const cmp = compareValues(left === undefined ? null : left, right === undefined ? null : right);
+	return cmp === null ? 0 : cmp;
+}
+
+/** A plain object literal usable as a nested entity map (not Date/ref/temp/lookupRef). */
+function isPlainObjectValue(value: unknown): value is InsertMap {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		!Array.isArray(value) &&
+		!(value instanceof Date) &&
+		!isRef(value) &&
+		!isTemp(value) &&
+		!isLookupRef(value)
+	);
+}
+
+/**
+ * Nested entity maps must be non-empty and must not smuggle scalar wire forms
+ * or operator objects through as entities (design/01: opaque scalars-as-objects
+ * are rejected).
+ */
+function assertNestedMapUsable(map: InsertMap, attribute: string): void {
+	if (Object.keys(map).length === 0) {
+		throw new Error(
+			`Invalid value for ${attribute}: empty objects are not supported (use ref()/lookupRef() for references)`
+		);
+	}
+
+	for (const key of Object.keys(map)) {
+		if (key.startsWith('$')) {
+			throw new Error(
+				`Invalid value for ${attribute}: "${key}" objects are not supported as values (nested entities use plain attribute maps)`
+			);
+		}
+	}
+}
+
+function mergePullFragments(target: Record<string, unknown>, fragment: Record<string, unknown>): void {
+	for (const [key, value] of Object.entries(fragment)) {
+		const existing = target[key];
+		if (existing === undefined) {
+			target[key] = value;
+			continue;
+		}
+
+		if (isPlainObjectValue(existing) && isPlainObjectValue(value)) {
+			mergePullFragments(existing, value);
+			continue;
+		}
+
+		if (Array.isArray(existing) && Array.isArray(value)) {
+			if (existing.length === value.length) {
+				for (let i = 0; i < existing.length; i += 1) {
+					const left = existing[i];
+					const right = value[i];
+					if (isPlainObjectValue(left) && isPlainObjectValue(right)) {
+						mergePullFragments(left, right);
+					} else {
+						existing[i] = right;
+					}
+				}
+			} else {
+				target[key] = value;
+			}
+			continue;
+		}
+
+		target[key] = value;
+	}
+}
+
 /**
  * Rejects values the data model does not support, at transaction time:
  * NaN / ±Infinity numbers, invalid Dates, opaque objects, and non-values
@@ -281,7 +581,7 @@ function assertSupportedValue(value: unknown, attribute: string): void {
 	}
 }
 
-function isVariable(term: QueryTerm): term is string {
+function isVariable(term: unknown): term is string {
 	return typeof term === 'string' && term.startsWith('?');
 }
 
@@ -369,6 +669,8 @@ export class FactDatabase {
 	private nextEntityEid = 1;
 	private attributeSchemas = new Map<string, AttributeSchema>();
 	private schemaByIdent = new Map<string, number>();
+	/** attribute -> valueKey -> holder entity ids, maintained at commit (design/04 unique-index optimization). */
+	private uniqueIndex = new Map<string, Map<string, Set<EntityId>>>();
 
 	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
 		const tx = this.nextTx++;
@@ -401,7 +703,62 @@ export class FactDatabase {
 		attributeValues.set(avetKey, avetFacts);
 		this.avet.set(attribute, attributeValues);
 
+		this.maintainUniqueIndex(attribute, value, eid, op);
+
 		return fact;
+	}
+
+	/**
+	 * Maintains the per-attribute unique-value index incrementally at commit.
+	 * The entry is built lazily from the AEVT index on first write after the
+	 * unique constraint exists (schema is data — constraints can be added to
+	 * attributes with pre-existing facts), then updated in place.
+	 */
+	private maintainUniqueIndex(attribute: string, value: unknown, eid: EntityId, op: FactOperation): void {
+		const schema = this.attributeSchemas.get(attribute);
+		if (schema?.unique !== 'identity' && schema?.unique !== 'value') {
+			return;
+		}
+
+		let holders = this.uniqueIndex.get(attribute);
+		if (!holders) {
+			holders = this.scanUniqueHolders(attribute);
+			this.uniqueIndex.set(attribute, holders);
+		}
+
+		const key = valueKey(value);
+		const valueHolders = holders.get(key) ?? new Set<EntityId>();
+		if (op === 'add') {
+			valueHolders.add(eid);
+		} else {
+			valueHolders.delete(eid);
+		}
+
+		if (valueHolders.size === 0) {
+			holders.delete(key);
+		} else {
+			holders.set(key, valueHolders);
+		}
+	}
+
+	/** Builds the full (attribute, value) -> holder map from the AEVT index. */
+	private scanUniqueHolders(attribute: string): Map<string, Set<EntityId>> {
+		const holders = new Map<string, Set<EntityId>>();
+		const attributeEntities = this.aevt.get(attribute);
+		if (!attributeEntities) {
+			return holders;
+		}
+
+		for (const [eid] of attributeEntities) {
+			for (const value of this.attributeValues(eid, attribute, Number.POSITIVE_INFINITY)) {
+				const valueKeyString = valueKey(value);
+				const valueHolders = holders.get(valueKeyString) ?? new Set<EntityId>();
+				valueHolders.add(eid);
+				holders.set(valueKeyString, valueHolders);
+			}
+		}
+
+		return holders;
 	}
 
 	add(eid: InputEid, attribute: string, value: unknown): Fact;
@@ -422,6 +779,383 @@ export class FactDatabase {
 			: ['retract', eidOrTuple, attribute as string, value];
 		const facts = this.transact([mutation]);
 		return facts[0] as Fact;
+	}
+
+	insert(input: InsertMap): EntityId;
+	insert(input: InsertMap[]): EntityId[];
+	insert(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		return this.insertMaps(input);
+	}
+
+	upsert(input: InsertMap): EntityId;
+	upsert(input: InsertMap[]): EntityId[];
+	upsert(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		return this.insertMaps(input);
+	}
+
+	/**
+	 * Object-map authoring (design/02): flattens nested graphs depth-first /
+	 * parent-major, expands arrays into cardinality-many facts, auto-declares
+	 * schema for array / nested-ref attributes, and resolves `db/unique:
+	 * 'identity'` attributes to existing entities (upsert). Returns resolved
+	 * entity ids aligned to the input maps.
+	 */
+	private insertMaps(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		const maps = Array.isArray(input) ? input : [input];
+		const tempids = new Map<string, number>();
+		const identityMap = new Map<string, EntityId>();
+		const mutations: Mutation[] = [];
+		const declared = new Map<string, SchemaDeclaration>();
+		const results: EntityId[] = [];
+
+		for (const map of maps) {
+			const eid = this.insertEidForMap(map, tempids, identityMap, () =>
+				this.tempidId(`insert:${tempids.size}`, tempids)
+			);
+			results.push(eid);
+			this.flattenMap(map, eid, tempids, identityMap, mutations, declared);
+		}
+
+		const entries: TransactionEntryInput[] = [...declared.values(), ...mutations];
+		if (entries.length > 0) {
+			this.transact(entries);
+		}
+
+		return Array.isArray(input) ? results : (results[0] as EntityId);
+	}
+
+	/**
+	 * Resolves the entity a top-level map writes to: an explicit `id` wins;
+	 * otherwise the first `db/unique: 'identity'` attribute (plain value or
+	 * lookupRef) matches an existing entity, and a fresh tempid is allocated
+	 * when nothing matches. Matches made earlier in the same call are reused so
+	 * repeated identity values alias within one transaction.
+	 */
+	private insertEidForMap(
+		map: InsertMap,
+		tempids: Map<string, number>,
+		identityMap: Map<string, EntityId>,
+		allocate: () => number
+	): EntityId {
+		const id = map['id'];
+		if (id !== undefined) {
+			return this.resolveEid(id as InputEid, tempids);
+		}
+
+		let allocated: EntityId | null = null;
+		for (const [attr, value] of Object.entries(map)) {
+			if (attr === 'id') {
+				continue;
+			}
+
+			let identityValue: unknown = value;
+			if (isLookupRef(value)) {
+				identityValue = value[LOOKUP_REF_BRAND][1];
+			} else if (isRef(value) && isLookupRef(value[REF_BRAND])) {
+				identityValue = value[REF_BRAND][LOOKUP_REF_BRAND][1];
+			}
+
+			if (this.attributeSchemas.get(attr)?.unique !== 'identity') {
+				continue;
+			}
+
+			const key = `identity:${attr}:${valueKey(identityValue)}`;
+			const inTransaction = identityMap.get(key);
+			if (inTransaction !== undefined) {
+				return inTransaction;
+			}
+
+			const existing = this.resolveIdentityTarget(attr, identityValue);
+			if (existing !== null) {
+				identityMap.set(key, existing);
+				return existing;
+			}
+
+			if (allocated === null) {
+				allocated = allocate();
+			}
+			identityMap.set(key, allocated);
+		}
+
+		return allocated ?? allocate();
+	}
+
+	/** Looks up the current holder of an `identity`-unique value, if any. */
+	private resolveIdentityTarget(attribute: string, identityValue: unknown): EntityId | null {
+		const schema = this.attributeSchemas.get(attribute);
+		if (!schema || schema.unique !== 'identity') {
+			return null;
+		}
+
+		const holders = this.activeUniqueHolders(attribute).get(valueKey(identityValue));
+		if (!holders || holders.size === 0) {
+			return null;
+		}
+
+		return [...holders][0] as EntityId;
+	}
+
+	/**
+	 * Deterministically flattens one attribute map into mutations. Depth-first,
+	 * parent-major: nested objects become entities joined via ref attributes
+	 * (auto-declared `valueType: 'ref'`), arrays expand into cardinality-many
+	 * facts (auto-declared cardinality many), and `ref(temp())` values resolve
+	 * against the transaction's tempid map (parent/sibling references).
+	 */
+	private flattenMap(
+		map: InsertMap,
+		eid: EntityId,
+		tempids: Map<string, number>,
+		identityMap: Map<string, EntityId>,
+		mutations: Mutation[],
+		declared: Map<string, SchemaDeclaration>
+	): void {
+		for (const [key, value] of Object.entries(map)) {
+			if (key === 'id') {
+				continue;
+			}
+
+			if (Array.isArray(value)) {
+				const hasObjects = value.some((item) => isPlainObjectValue(item));
+
+				if (hasObjects) {
+					this.declareSchema(declared, key, 'ref', 'many');
+					for (const item of value) {
+						if (!isPlainObjectValue(item)) {
+							throw new Error(
+								`Invalid value for ${key}: cannot mix nested objects and scalar values in one array`
+							);
+						}
+
+						assertNestedMapUsable(item, key);
+						const childEid = this.nestedEid(item, tempids);
+						this.flattenMap(item, childEid, tempids, identityMap, mutations, declared);
+						mutations.push(['add', eid, key, ref(childEid)]);
+					}
+					continue;
+				}
+
+				this.declareSchema(declared, key, 'unknown', 'many');
+				if (value.length === 0) {
+					continue;
+				}
+
+				for (const item of value) {
+					mutations.push(['add', eid, key, this.resolveInsertValue(item, tempids, identityMap)]);
+				}
+				continue;
+			}
+
+			if (isPlainObjectValue(value)) {
+				assertNestedMapUsable(value, key);
+				this.declareSchema(declared, key, 'ref', 'one');
+				const childEid = this.nestedEid(value, tempids);
+				this.flattenMap(value, childEid, tempids, identityMap, mutations, declared);
+				mutations.push(['add', eid, key, ref(childEid)]);
+				continue;
+			}
+
+			mutations.push(['add', eid, key, this.resolveInsertValueForKey(key, value, tempids, identityMap)]);
+		}
+	}
+
+	private nestedEid(map: InsertMap, tempids: Map<string, number>): EntityId {
+		const id = map['id'];
+		if (id !== undefined) {
+			return this.resolveEid(id as InputEid, tempids);
+		}
+
+		return this.tempidId(`nested:${tempids.size}`, tempids);
+	}
+
+	/**
+	 * Auto-declares schema for attributes the object grammar introduced. Only
+	 * attributes without an existing schema are declared (existing schema
+	 * governs, and its constraints surface through normal validation).
+	 */
+	private declareSchema(
+		declared: Map<string, SchemaDeclaration>,
+		ident: string,
+		valueType: ValueType,
+		cardinality: Cardinality
+	): void {
+		if (this.attributeSchemas.has(ident)) {
+			return;
+		}
+
+		const existing = declared.get(ident);
+		if (existing) {
+			if (existing.valueType !== valueType || existing.cardinality !== cardinality) {
+				throw new Error(`Schema conflict for ${ident}: conflicting auto-declared valueType/cardinality`);
+			}
+			return;
+		}
+
+		declared.set(ident, { ident, valueType, cardinality });
+	}
+
+	/**
+	 * Resolves one scalar value in the object grammar. Bare `temp()` is rejected
+	 * (same rule as the tuple surface); `lookupRef()` values resolve to `ref()`
+	 * against `db/unique: 'identity'` holders (P1 upsert resolution), raising
+	 * when nothing matches; `ref(temp())` / `ref(negative)` resolve to the
+	 * tempid's allocated id.
+	 */
+	private resolveInsertValue(
+		value: unknown,
+		tempids: Map<string, number>,
+		identityMap: Map<string, EntityId>
+	): unknown {
+		if (isTemp(value)) {
+			throw new Error('temp() can only be used as an entity id or wrapped in ref()');
+		}
+
+		if (isLookupRef(value)) {
+			return ref(this.resolveLookupRefTarget(value, identityMap));
+		}
+
+		if (!isRef(value)) {
+			return value;
+		}
+
+		const target = value[REF_BRAND];
+		if (isLookupRef(target)) {
+			return ref(this.resolveLookupRefTarget(target, identityMap));
+		}
+
+		if (isTemp(target)) {
+			return ref(this.tempidId(`t:${target[TEMP_BRAND]}`, tempids));
+		}
+
+		if (typeof target === 'number' && target < 0) {
+			return ref(this.tempidId(`n:${target}`, tempids));
+		}
+
+		return value;
+	}
+
+	/**
+	 * Identity-attribute variant of `resolveInsertValue`: a lookupRef on the
+	 * attribute's own identity-unique key is an upsert marker — the plain scalar
+	 * is stored, not a ref to the matched entity.
+	 */
+	private resolveInsertValueForKey(
+		key: string,
+		value: unknown,
+		tempids: Map<string, number>,
+		identityMap: Map<string, EntityId>
+	): unknown {
+		if (isLookupRef(value)) {
+			const [attribute, scalar] = value[LOOKUP_REF_BRAND];
+			if (attribute === key && this.attributeSchemas.get(key)?.unique === 'identity') {
+				return scalar;
+			}
+			return ref(this.resolveLookupRefTarget(value, identityMap));
+		}
+
+		if (isRef(value) && isLookupRef(value[REF_BRAND])) {
+			const [attribute, scalar] = value[REF_BRAND][LOOKUP_REF_BRAND];
+			if (attribute === key && this.attributeSchemas.get(key)?.unique === 'identity') {
+				return scalar;
+			}
+		}
+
+		return this.resolveInsertValue(value, tempids, identityMap);
+	}
+
+	private resolveLookupRefTarget(lookup: LookupRef, identityMap: Map<string, EntityId>): EntityId {
+		const [attribute, value] = lookup[LOOKUP_REF_BRAND];
+		const key = `lookupRef:${attribute}:${valueKey(value)}`;
+		const inTransaction = identityMap.get(key);
+		if (inTransaction !== undefined) {
+			return inTransaction;
+		}
+
+		const existing = this.resolveIdentityTarget(attribute, value);
+		if (existing === null) {
+			throw new Error(
+				`lookupRef([${attribute}, ${JSON.stringify(value)}]) does not match any entity (no db/unique: 'identity' holder)`
+			);
+		}
+
+		identityMap.set(key, existing);
+		return existing;
+	}
+
+	set(eid: EntityId, attribute: string, value: unknown): Fact[];
+	set(eid: EntityId, changes: Record<string, unknown>): Fact[];
+	set(eid: EntityId, attributeOrChanges: string | Record<string, unknown>, value?: unknown): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, value);
+	}
+
+	patch(eid: EntityId, attribute: string, value: unknown): Fact[];
+	patch(eid: EntityId, changes: Record<string, unknown>): Fact[];
+	patch(eid: EntityId, attributeOrChanges: string | Record<string, unknown>, value?: unknown): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, value);
+	}
+
+	/**
+	 * Diff-based update (design/02): compares the requested attribute values
+	 * against the entity's current state and emits retract+add pairs in one
+	 * transaction. `null` means retract. Cardinality-many attributes diff as
+	 * sets (arrays replace the member set, scalars replace it with one member);
+	 * one-valued attributes retract-then-add on change.
+	 */
+	private applyChanges(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		value?: unknown
+	): Fact[] {
+		const changes: Record<string, unknown> =
+			typeof attributeOrChanges === 'string' ? { [attributeOrChanges]: value } : attributeOrChanges;
+		if (Object.keys(changes).length === 0) {
+			return [];
+		}
+
+		const mutations: Mutation[] = [];
+		for (const [attribute, next] of Object.entries(changes)) {
+			const schema = this.attributeSchemas.get(attribute);
+			const currentValues = this.activeValues(eid, attribute);
+
+			if (schema?.cardinality === 'many') {
+				const nextValues = next === null ? [] : Array.isArray(next) ? next : [next];
+				const current = new Map<string, unknown>(currentValues.map((v) => [valueKey(v), v] as const));
+				const target = new Map<string, unknown>(nextValues.map((v) => [valueKey(v), v] as const));
+
+				for (const [key, currentValue] of current) {
+					if (!target.has(key)) {
+						mutations.push(['retract', eid, attribute, currentValue]);
+					}
+				}
+				for (const [key, nextValue] of target) {
+					if (!current.has(key)) {
+						mutations.push(['add', eid, attribute, nextValue]);
+					}
+				}
+				continue;
+			}
+
+			const currentValue = currentValues[0];
+			if (next === null) {
+				if (currentValue !== undefined) {
+					mutations.push(['retract', eid, attribute, currentValue]);
+				}
+				continue;
+			}
+
+			if (currentValue === undefined || !sameValue(currentValue, next)) {
+				if (currentValue !== undefined) {
+					mutations.push(['retract', eid, attribute, currentValue]);
+				}
+				mutations.push(['add', eid, attribute, next]);
+			}
+		}
+
+		if (mutations.length === 0) {
+			return [];
+		}
+
+		return this.transact(mutations);
 	}
 
 	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
@@ -646,8 +1380,9 @@ export class FactDatabase {
 		return Object.freeze(entity);
 	}
 
-	find(criteria: Record<string, unknown>, tx?: number): EntityState[] {
-		const txLimit = normalizeTxLimit(tx);
+	find(criteria: Record<string, unknown>, options?: number | FindOptions): EntityState[] {
+		const opts: FindOptions = typeof options === 'number' ? { tx: options } : (options ?? {});
+		const txLimit = normalizeTxLimit(opts.tx);
 		const matches: EntityState[] = [];
 
 		for (const eid of this.candidateEidsForCriteria(criteria, txLimit)) {
@@ -656,19 +1391,95 @@ export class FactDatabase {
 				continue;
 			}
 
-			const doesMatch = Object.entries(criteria).every(([key, value]) => sameValue(entity[key], value));
-			if (doesMatch) {
+			if (this.entityMatchesCriteria(entity, criteria, txLimit)) {
 				matches.push(entity);
 			}
 		}
 
-		return matches;
+		let result = matches;
+		if (opts.orderBy) {
+			result = this.orderEntities(result, opts.orderBy);
+		}
+		if (opts.offset) {
+			result = result.slice(opts.offset);
+		}
+		if (opts.limit !== undefined) {
+			result = result.slice(0, opts.limit);
+		}
+		if (opts.select) {
+			result = result.map((entity) => this.selectEntity(entity, opts.select as string[]));
+		}
+
+		return result;
+	}
+
+	private entityMatchesCriteria(entity: EntityState, criteria: Record<string, unknown>, txLimit: number): boolean {
+		for (const [key, criterion] of Object.entries(criteria)) {
+			if (key === 'id') {
+				if (!criterionMatchesValue([entity.id], criterion)) {
+					return false;
+				}
+				continue;
+			}
+
+			const values = this.attributeValues(entity.id, key, txLimit);
+			if (!criterionMatchesValue(values, criterion)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/** Stable multi-key ordering; missing attributes sort first in both directions. */
+	private orderEntities(matches: EntityState[], orderBy: OrderBy | OrderBy[]): EntityState[] {
+		const raw = orderBy as OrderBy[];
+		if (raw.length === 0) {
+			return matches;
+		}
+
+		const pairs: OrderBy[] = Array.isArray(raw[0]) ? raw : [orderBy as OrderBy];
+		const decorated = matches.map((entity, index) => ({ entity, index }));
+		decorated.sort((left, right) => {
+			for (const [attribute, direction] of pairs) {
+				const leftValue = left.entity[attribute];
+				const rightValue = right.entity[attribute];
+				const cmp = compareOrderValues(
+					Array.isArray(leftValue) ? leftValue[0] : leftValue,
+					Array.isArray(rightValue) ? rightValue[0] : rightValue
+				);
+				if (cmp !== 0) {
+					return direction === 'asc' ? cmp : -cmp;
+				}
+			}
+
+			return left.index - right.index;
+		});
+
+		return decorated.map(({ entity }) => entity);
+	}
+
+	private selectEntity(entity: EntityState, select: string[]): EntityState {
+		const picked: Record<string, unknown> = { id: entity.id };
+		for (const key of select) {
+			if (key === 'id') {
+				continue;
+			}
+
+			if (key in entity) {
+				picked[key] = entity[key];
+			}
+		}
+
+		return Object.freeze(picked) as EntityState;
 	}
 
 	/**
-	 * Returns candidate entity ids (in global first-fact order) that could match the
-	 * criteria, narrowed through the AVET/AEVT indexes. Correctness still comes from
-	 * the full entity check in `find`; this only avoids scanning every fact.
+	 * Returns candidate entity ids (in global first-fact order) that could match
+	 * the criteria, narrowed through the AVET/AEVT indexes. Operator criteria
+	 * narrow only where an exact AVET key exists ($eq/$in/$contains); range and
+	 * presence operators fall back to every entity and rely on the full match
+	 * check in `find`. Correctness always comes from `entityMatchesCriteria`.
 	 */
 	private candidateEidsForCriteria(criteria: Record<string, unknown>, txLimit: number): EntityId[] {
 		const entries = Object.entries(criteria);
@@ -677,25 +1488,48 @@ export class FactDatabase {
 		}
 
 		const sets: Array<Set<EntityId>> = [];
-		for (const [key, value] of entries) {
+		for (const [key, criterion] of entries) {
 			const eids = new Set<EntityId>();
 
 			if (key === 'id') {
-				if (typeof value === 'number' || typeof value === 'string') {
-					eids.add(value);
+				if (isFindOperator(criterion)) {
+					if (criterion.$eq !== undefined && (typeof criterion.$eq === 'number' || typeof criterion.$eq === 'string')) {
+						eids.add(criterion.$eq);
+					} else if (Array.isArray(criterion.$in)) {
+						for (const item of criterion.$in) {
+							if (typeof item === 'number' || typeof item === 'string') {
+								eids.add(item);
+							}
+						}
+					} else {
+						this.addAllEids(eids);
+					}
+				} else if (typeof criterion === 'number' || typeof criterion === 'string') {
+					eids.add(criterion);
+				} else {
+					this.addAllEids(eids);
 				}
 				sets.push(eids);
 				continue;
 			}
 
-			const valueFacts = this.avet.get(key)?.get(valueKey(value));
-			if (valueFacts) {
-				for (const fact of valueFacts) {
-					if (fact[3] <= txLimit) {
-						eids.add(fact[0]);
+			if (isFindOperator(criterion)) {
+				if (criterion.$eq !== undefined) {
+					this.addAvetCandidates(eids, key, criterion.$eq, txLimit);
+				} else if (Array.isArray(criterion.$in) && criterion.$in.length > 0) {
+					for (const item of criterion.$in) {
+						this.addAvetCandidates(eids, key, item, txLimit);
 					}
+				} else if (criterion.$contains !== undefined) {
+					this.addAvetCandidates(eids, key, criterion.$contains, txLimit);
+				} else {
+					this.addAllEids(eids);
 				}
+				sets.push(eids);
+				continue;
 			}
+
+			this.addAvetCandidates(eids, key, criterion, txLimit);
 			sets.push(eids);
 		}
 
@@ -707,6 +1541,193 @@ export class FactDatabase {
 		}
 
 		return ordered;
+	}
+
+	private addAvetCandidates(eids: Set<EntityId>, attribute: string, value: unknown, txLimit: number): void {
+		const valueFacts = this.avet.get(attribute)?.get(valueKey(value));
+		if (!valueFacts) {
+			return;
+		}
+
+		for (const fact of valueFacts) {
+			if (fact[3] <= txLimit) {
+				eids.add(fact[0]);
+			}
+		}
+	}
+
+	private addAllEids(eids: Set<EntityId>): void {
+		for (const eid of this.eavt.keys()) {
+			eids.add(eid);
+		}
+	}
+
+	private orderCandidates(eids: Set<EntityId>): EntityId[] {
+		const ordered: EntityId[] = [];
+		for (const eid of this.eavt.keys()) {
+			if (eids.has(eid)) {
+				ordered.push(eid);
+			}
+		}
+
+		return ordered;
+	}
+
+	/**
+	 * Dot-path selection (design/02). Each path is a '.'-separated attribute
+	 * walk: at every level the longest segment prefix whose '/' join names an
+	 * active attribute is consumed (so `user.name` reads `user/name`), and ref
+	 * attributes (schema `db/ref` / `valueType: 'ref'`, or ref()-valued) are
+	 * traversed into nested objects that carry `id`. Many-valued refs yield
+	 * arrays; multiple paths deep-merge into one result.
+	 */
+	pull(eid: EntityId, paths: PullPath, tx?: number): EntityState | null {
+		const txLimit = normalizeTxLimit(tx);
+		if (this.entity(eid, txLimit) === null) {
+			return null;
+		}
+
+		const pathList = Array.isArray(paths) ? paths : paths.trim().split(/\s+/).filter((path) => path.length > 0);
+		const result: Record<string, unknown> = { id: eid };
+		for (const path of pathList) {
+			const segments = path.split('.').filter((segment) => segment.length > 0);
+			if (segments.length === 0) {
+				continue;
+			}
+
+			const fragment = this.pullPath(eid, segments, txLimit);
+			if (fragment !== null) {
+				mergePullFragments(result, fragment);
+			}
+		}
+
+		return Object.freeze(result) as EntityState;
+	}
+
+	private pullPath(eid: EntityId, segments: string[], txLimit: number): Record<string, unknown> | null {
+		for (let length = segments.length; length >= 1; length -= 1) {
+			const attribute = segments.slice(0, length).join('/');
+			const values = this.attributeValues(eid, attribute, txLimit);
+			if (values.length === 0) {
+				continue;
+			}
+
+			const rest = segments.slice(length);
+			const schema = this.attributeSchemas.get(attribute);
+			const refAttribute = schema?.ref === true || schema?.valueType === 'ref';
+
+			if (rest.length === 0) {
+				if (refAttribute) {
+					const ids = values
+						.map((value) => this.pullRefTarget(value))
+						.filter((target): target is EntityId => target !== null);
+					if (ids.length > 0) {
+						return {
+							[attribute]: ids.length === 1 ? { id: ids[0] } : ids.map((id) => ({ id }))
+						};
+					}
+				}
+
+				return { [attribute]: values.length === 1 ? values[0] : values };
+			}
+
+			if (!refAttribute && !values.some((value) => isRef(value) || isLookupRef(value))) {
+				return null; // scalar attribute cannot be traversed
+			}
+
+			const nested: Array<Record<string, unknown>> = [];
+			for (const value of values) {
+				const target = this.pullRefTarget(value);
+				if (target === null) {
+					continue;
+				}
+
+				const fragment = this.pullPath(target, rest, txLimit);
+				if (fragment !== null) {
+					nested.push({ id: target, ...fragment });
+				}
+			}
+
+			if (nested.length === 0) {
+				return null;
+			}
+
+			return { [attribute]: nested.length === 1 ? nested[0] : nested };
+		}
+
+		return null;
+	}
+
+	private pullRefTarget(value: unknown): EntityId | null {
+		if (isRef(value)) {
+			const target = value[REF_BRAND];
+			if (isLookupRef(target)) {
+				return this.resolveIdentityTarget(target[LOOKUP_REF_BRAND][0], target[LOOKUP_REF_BRAND][1]);
+			}
+
+			if (typeof target === 'number' || typeof target === 'string') {
+				return target;
+			}
+
+			return null;
+		}
+
+		if (isLookupRef(value)) {
+			return this.resolveIdentityTarget(value[LOOKUP_REF_BRAND][0], value[LOOKUP_REF_BRAND][1]);
+		}
+
+		return null;
+	}
+
+	/**
+	 * A transaction-scoped read view (design/02 time travel). `atTransaction`
+	 * remains as an alias.
+	 */
+	at(tx: number): {
+		entity: (eid: EntityId) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
+	} {
+		return {
+			entity: (eid: EntityId) => this.entity(eid, tx),
+			find: (criteria: Record<string, unknown>, options?: FindOptions) =>
+				this.find(criteria, { ...options, tx }),
+			query: (spec: QuerySpec) => this.query(spec, tx),
+			pull: (eid: EntityId, paths: PullPath) => this.pull(eid, paths, tx)
+		};
+	}
+
+	atTransaction(tx: number): {
+		entity: (eid: EntityId) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
+	} {
+		return this.at(tx);
+	}
+
+	/**
+	 * The facts committed in transactions (min(txA, txB), max(txA, txB)],
+	 * grouped by operation — the primitive for DevTools timelines and undo/redo.
+	 */
+	diff(txA: number, txB: number): DiffResult {
+		const from = Math.min(txA, txB);
+		const to = Math.max(txA, txB);
+		const added: Fact[] = [];
+		const retracted: Fact[] = [];
+
+		for (const fact of this.facts) {
+			if (fact[3] > from && fact[3] <= to) {
+				if (fact[4] === 'add') {
+					added.push(fact);
+				} else {
+					retracted.push(fact);
+				}
+			}
+		}
+
+		return { added, retracted };
 	}
 
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
@@ -732,10 +1753,21 @@ export class FactDatabase {
 		let bindings: QueryTerm[][] = [[]];
 
 		if (where.length > 0) {
-			const candidates = this.candidateEidsForQuery(where, txLimit);
-			const candidateSet = new Set(candidates);
+			// Textbook datalog with per-clause candidate sets (fixes the P0
+			// cross-variable narrowing logged in issues.md): an unbound entity
+			// variable ranges over the entities matching ITS OWN clause, not the
+			// intersection of every clause's candidates. Each per-clause set is
+			// ordered by global first-fact order, so result ordering stays
+			// deterministic: unbound entity variables expand in first-fact order
+			// and bound variables expand their values in insertion order.
+			const clauseCandidates = where.map((clause) => this.candidateEidsForClause(clause, txLimit));
+			const clauseCandidateSets = clauseCandidates.map((candidates) => new Set(candidates));
 
-			for (const [entityTerm, attribute, valueTerm] of where) {
+			for (let clauseIndex = 0; clauseIndex < where.length; clauseIndex += 1) {
+				const [entityTerm, attribute, valueTerm] = where[clauseIndex] as QueryClause;
+				const candidates = clauseCandidates[clauseIndex] as EntityId[];
+				const candidateSet = clauseCandidateSets[clauseIndex] as Set<EntityId>;
+
 				if (bindings.length === 0) {
 					break;
 				}
@@ -928,12 +1960,17 @@ export class FactDatabase {
 
 	/**
 	 * True when the entity's active value(s) for `attribute` as of `txLimit`
-	 * include `value`. Cardinality-many matching uses the canonical value key
-	 * (consistent with state reconstruction); everything else keeps Object.is
-	 * semantics. Mirrors attributeValues + clauseTriples' constant filter
-	 * without allocating.
+	 * satisfy the clause's value term. Operator terms are evaluated against the
+	 * active values (same semantics as `find`); constant terms use the canonical
+	 * value key on cardinality-many attributes and on non-QueryTerm constants
+	 * (Date / bigint / ref / lookupRef), keeping Object.is semantics for scalar
+	 * constants on cardinality-one attributes.
 	 */
-	private hasAttributeValue(eid: EntityId, attribute: string, value: QueryTerm, txLimit: number): boolean {
+	private hasAttributeValue(eid: EntityId, attribute: string, value: QueryValueTerm, txLimit: number): boolean {
+		if (isFindOperator(value)) {
+			return criterionMatchesValue(this.attributeValues(eid, attribute, txLimit), value);
+		}
+
 		const facts = this.eavt.get(eid)?.get(attribute);
 		if (!facts) {
 			return false;
@@ -973,56 +2010,67 @@ export class FactDatabase {
 			}
 		}
 
-		return isQueryTerm(current) && Object.is(current, value);
+		if (current === undefined) {
+			return false;
+		}
+
+		if (isQueryTerm(value)) {
+			return isQueryTerm(current) && Object.is(current, value);
+		}
+
+		return sameValue(current, value);
 	}
 
 	/**
-	 * Returns entity ids (in global first-fact order) that satisfy every clause's
-	 * attribute/value constraint, narrowed via the AVET/AEVT indexes instead of
-	 * scanning every fact. Any entity that can contribute to a result row is a
-	 * member of every per-clause set, so restricting to this intersection never
-	 * drops a result (and preserves the full-scan row ordering).
+	 * Returns entity ids (in global first-fact order) that can satisfy THIS
+	 * clause's attribute/value constraint, narrowed via the AVET/AEVT indexes.
+	 * Operator terms narrow only where an exact AVET key exists ($eq/$in/
+	 * $contains); range/presence operators fall back to every entity and rely on
+	 * `hasAttributeValue` for correctness. Per-clause sets are what the join
+	 * iterates for unbound entity variables (textbook datalog semantics).
 	 */
-	private candidateEidsForQuery(where: QueryClause[], txLimit: number): EntityId[] {
-		const sets: Array<Set<EntityId>> = [];
-		for (const [, attribute, valueTerm] of where) {
-			const eids = new Set<EntityId>();
+	private candidateEidsForClause(clause: QueryClause, txLimit: number): EntityId[] {
+		const [entityTerm, attribute, valueTerm] = clause;
+		const eids = new Set<EntityId>();
 
-			if (!isVariable(valueTerm)) {
-				const valueFacts = this.avet.get(attribute)?.get(valueKey(valueTerm));
-				if (valueFacts) {
-					for (const fact of valueFacts) {
-						if (fact[3] <= txLimit) {
-							eids.add(fact[0]);
-						}
-					}
-				}
-				sets.push(eids);
-				continue;
-			}
-
-			const attributeEntities = this.aevt.get(attribute);
-			if (attributeEntities) {
-				for (const [eid, facts] of attributeEntities) {
-					for (const fact of facts) {
-						if (fact[3] <= txLimit) {
-							eids.add(eid);
-							break;
-						}
-					}
-				}
-			}
-			sets.push(eids);
+		if ((typeof entityTerm === 'number' || typeof entityTerm === 'string') && !isVariable(entityTerm)) {
+			eids.add(entityTerm);
+			return [...eids];
 		}
 
-		const ordered: EntityId[] = [];
-		for (const eid of this.eavt.keys()) {
-			if (sets.every((set) => set.has(eid))) {
-				ordered.push(eid);
+		if (isFindOperator(valueTerm)) {
+			if (valueTerm.$eq !== undefined) {
+				this.addAvetCandidates(eids, attribute, valueTerm.$eq, txLimit);
+			} else if (Array.isArray(valueTerm.$in) && valueTerm.$in.length > 0) {
+				for (const item of valueTerm.$in) {
+					this.addAvetCandidates(eids, attribute, item, txLimit);
+				}
+			} else if (valueTerm.$contains !== undefined) {
+				this.addAvetCandidates(eids, attribute, valueTerm.$contains, txLimit);
+			} else {
+				this.addAllEids(eids);
+			}
+			return this.orderCandidates(eids);
+		}
+
+		if (!isVariable(valueTerm)) {
+			this.addAvetCandidates(eids, attribute, valueTerm, txLimit);
+			return this.orderCandidates(eids);
+		}
+
+		const attributeEntities = this.aevt.get(attribute);
+		if (attributeEntities) {
+			for (const [eid, facts] of attributeEntities) {
+				for (const fact of facts) {
+					if (fact[3] <= txLimit) {
+						eids.add(eid);
+						break;
+					}
+				}
 			}
 		}
 
-		return ordered;
+		return this.orderCandidates(eids);
 	}
 
 	/**
@@ -1162,6 +2210,10 @@ export class FactDatabase {
 	private validateMutations(mutations: Mutation[]): void {
 		const manyState = new Map<string, Map<string, unknown>>();
 		const oneState = new Map<string, unknown>();
+		// Tracks values retracted earlier in this transaction so a same-tx
+		// retract-then-re-add (set/patch diff updates) does not re-see the
+		// committed value and raise a false cardinality conflict.
+		const oneRetracted = new Map<string, true>();
 		const uniqueState = new Map<string, Map<string, Set<EntityId>>>();
 
 		for (const [op, eid, attribute, value] of mutations) {
@@ -1200,17 +2252,23 @@ export class FactDatabase {
 				continue;
 			}
 
-			const current = oneState.has(key) ? oneState.get(key) : this.activeValues(eid, attribute)[0];
+			const current = oneState.has(key)
+				? oneState.get(key)
+				: oneRetracted.has(key)
+					? undefined
+					: this.activeValues(eid, attribute)[0];
 			if (op === 'add') {
 				if (current !== undefined && !Object.is(current, value)) {
 					throw new Error(`Cardinality conflict for ${attribute}: expected one value`);
 				}
 				oneState.set(key, value);
+				oneRetracted.delete(key);
 				continue;
 			}
 
 			if (current !== undefined && Object.is(current, value)) {
 				oneState.delete(key);
+				oneRetracted.set(key, true);
 			}
 		}
 	}
@@ -1227,7 +2285,14 @@ export class FactDatabase {
 		op: FactOperation,
 		uniqueState: Map<string, Map<string, Set<EntityId>>>
 	): void {
-		const holders = uniqueState.get(attribute) ?? this.activeUniqueHolders(attribute);
+		// Defensive copy: the committed index must never be mutated by a
+		// transaction that later fails validation.
+		const base = uniqueState.get(attribute) ?? this.activeUniqueHolders(attribute);
+		const holders = new Map<string, Set<EntityId>>();
+		for (const [key, set] of base) {
+			holders.set(key, new Set(set));
+		}
+
 		const valueKeyString = valueKey(value);
 		const valueHolders = holders.get(valueKeyString) ?? new Set<EntityId>();
 
@@ -1248,24 +2313,13 @@ export class FactDatabase {
 		uniqueState.set(attribute, holders);
 	}
 
-	/** Active (entity, value) holders for a unique attribute across all entities. */
+	/**
+	 * Active (entity, value) holders for a unique attribute across all entities.
+	 * Served from the commit-maintained unique index; the index entry is built
+	 * lazily when a unique constraint is added to pre-existing facts.
+	 */
 	private activeUniqueHolders(attribute: string): Map<string, Set<EntityId>> {
-		const holders = new Map<string, Set<EntityId>>();
-		const attributeEntities = this.aevt.get(attribute);
-		if (!attributeEntities) {
-			return holders;
-		}
-
-		for (const [eid] of attributeEntities) {
-			for (const value of this.attributeValues(eid, attribute, Number.POSITIVE_INFINITY)) {
-				const valueKeyString = valueKey(value);
-				const valueHolders = holders.get(valueKeyString) ?? new Set<EntityId>();
-				valueHolders.add(eid);
-				holders.set(valueKeyString, valueHolders);
-			}
-		}
-
-		return holders;
+		return this.uniqueIndex.get(attribute) ?? this.scanUniqueHolders(attribute);
 	}
 
 	private activeValues(eid: EntityId, attribute: string): unknown[] {

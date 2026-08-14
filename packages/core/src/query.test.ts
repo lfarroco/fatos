@@ -51,13 +51,14 @@ describe('find', () => {
 		expect(db.find({ type: 'user' })).toEqual([{ id: 1, type: 'user' }]);
 	});
 
-	it('does not match cardinality-many values (known limitation, see design/02)', () => {
+	it('matches members of cardinality-many attributes (P1: fixes the P0 array-find limitation)', () => {
 		const db = createDatabase();
 		db.transact([{ ident: 'user/tags', valueType: 'string', cardinality: 'many' }]);
 		db.add(1, 'user/tags', 'ts');
-		// KNOWN LIMITATION: find compares criteria via Object.is against the whole array,
-		// so scalar criteria never match many-valued attributes.
-		expect(db.find({ 'user/tags': 'ts' })).toEqual([]);
+		// P1: bare criteria values are $eq and match any member of a
+		// cardinality-many attribute (previously find compared against the
+		// whole array and never matched).
+		expect(db.find({ 'user/tags': 'ts' })).toEqual([{ id: 1, 'user/tags': ['ts'] }]);
 	});
 });
 
@@ -208,14 +209,15 @@ describe('datalog query', () => {
 		]);
 	});
 
-	it('joins two distinct entity variables in candidate (first-fact) order', () => {
+	it('joins two distinct entity variables in per-clause candidate order', () => {
 		const db = createDatabase();
 		db.add(1, 'type', 'user');
 		db.add(1, 'age', 30);
 		db.add(2, 'type', 'user');
 		db.add(2, 'age', 40);
-		// The engine narrows every clause to the shared candidate intersection, so
-		// ?b ranges over the same candidates as ?a (preserved from the full scan).
+		// P1: each unbound entity variable ranges over ITS OWN clause's
+		// candidates (textbook datalog). Both clauses share candidates here, so
+		// rows are the full cross product in first-fact order.
 		expect(
 			db.query({
 				find: ['?a', '?b', '?age'],
@@ -229,6 +231,34 @@ describe('datalog query', () => {
 			[1, 2, 40],
 			[2, 1, 30],
 			[2, 2, 40]
+		]);
+	});
+
+	it('does not narrow distinct entity variables to the shared candidate intersection', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user');
+		db.add(1, 'age', 30);
+		db.add(2, 'type', 'user');
+		db.add(2, 'age', 40);
+		db.add(3, 'type', 'user'); // has type but no age
+		// P0 bug (issues.md): the engine intersected every clause's candidates,
+		// so ?a ranged only over {1, 2}. P1: ?a ranges over type=user entities
+		// {1, 2, 3} while ?b ranges over age holders {1, 2}.
+		expect(
+			db.query({
+				find: ['?a', '?b', '?age'],
+				where: [
+					['?a', 'type', 'user'],
+					['?b', 'age', '?age']
+				]
+			})
+		).toEqual([
+			[1, 1, 30],
+			[1, 2, 40],
+			[2, 1, 30],
+			[2, 2, 40],
+			[3, 1, 30],
+			[3, 2, 40]
 		]);
 	});
 

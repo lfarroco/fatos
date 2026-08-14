@@ -143,7 +143,16 @@ class Model {
 				continue;
 			}
 
-			const doesMatch = Object.entries(criteria).every(([key, value]) => Object.is(entity[key], value));
+			// P1 semantics: bare criteria values are $eq and match any member of
+			// a cardinality-many attribute (mirrors the engine's find operators).
+			const doesMatch = Object.entries(criteria).every(([key, value]) => {
+				const entityValue = entity[key];
+				if (Array.isArray(entityValue)) {
+					return entityValue.some((item) => Object.is(item, value));
+				}
+
+				return Object.is(entityValue, value);
+			});
 			if (doesMatch) {
 				matches.push(entity);
 			}
