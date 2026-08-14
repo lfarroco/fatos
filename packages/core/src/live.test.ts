@@ -242,6 +242,14 @@ describe('db.live — dispose semantics', () => {
 
 		// Dispose is idempotent and further subscriptions are inert.
 		live.dispose();
+
+		const late = vi.fn();
+		live.subscribe(late);
+		db.add(3, 'user/role', 'admin');
+		expect(late).not.toHaveBeenCalled();
+	});
+});
+
 describe('db.liveQuery', () => {
 	it('yields the initial result then each subsequent change', async () => {
 		const db = createDatabase();
@@ -262,17 +270,19 @@ describe('db.liveQuery', () => {
 			{ id: 2, 'user/role': 'admin' }
 		]);
 
-		// Unrelated writes are not delivered.
+		// Unrelated writes are not delivered: the stream stays pending and the
+		// result is unchanged (result diffing suppresses the notification).
 		db.add(1, 'user/name', 'Alice');
 		db.add(2, 'user/age', 30);
-		const third = await iterator.next();
-		expect(third.done).toBe(false);
-		expect(third.value).toEqual([
+		await expect(
+			Promise.race([iterator.next(), Promise.resolve('no-delivery')])
+		).resolves.toBe('no-delivery');
+		expect(query.current).toEqual([
 			{ id: 1, 'user/role': 'admin' },
 			{ id: 2, 'user/role': 'admin' }
 		]);
 
-		await iterator.return();
+		query.dispose();
 		const after = await iterator.next();
 		expect(after.done).toBe(true);
 	});
@@ -289,11 +299,13 @@ describe('db.liveQuery', () => {
 			}
 		})();
 
-		await Promise.resolve();
+		// An async generator takes two microtask turns to deliver the first
+		// yielded value; a macrotask flush is deterministic either way.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(values).toEqual([[{ id: 1, 'user/role': 'admin' }]]);
 
 		db.add(2, 'user/role', 'admin');
-		await Promise.resolve();
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(values).toEqual([
 			[{ id: 1, 'user/role': 'admin' }],
 			[
@@ -350,13 +362,6 @@ describe('db.liveQuery', () => {
 		db.add(3, 'user/role', 'admin');
 		expect(callback).toHaveBeenCalledTimes(1);
 		expect(query.current).toHaveLength(2);
-	});
-});
-
-		const late = vi.fn();
-		live.subscribe(late);
-		db.add(3, 'user/role', 'admin');
-		expect(late).not.toHaveBeenCalled();
 	});
 });
 

@@ -271,7 +271,7 @@ back to sub-agents for fixes.
 - **Task**: P2 client half (EventTarget + live/liveQuery delegation, packages/client only)
 - **Found by**: P2 client implementation (packages/client)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: In `packages/core/src/live.test.ts`, `describe('db.liveQuery',
   ...)` (line 245) is nested inside the `it('stops tracking and keeps current
   read-safe after dispose', ...)` callback (opened at line 229); the trailing
@@ -289,7 +289,27 @@ back to sub-agents for fixes.
   scope for the client-only P2 task; left for a core-package cleanup (the
   closing `});` of `it('stops tracking...')` should move before the
   `describe('db.liveQuery', ...)` block).
-- **Resolution**: none (noted; core untouched in this run).
+- **Resolution**: restructured `packages/core/src/live.test.ts` so all
+  `describe` blocks are top-level: the dangling tail of `it('stops
+  tracking...')` (late-subscriber assertions) was moved into its body, the
+  `it` and `describe('db.live — dispose semantics')` are closed before the
+  `describe('db.liveQuery', ...)` block, which now sits at module scope.
+  vitest now collects all 17 tests for the file (was 12), and
+  `--testNamePattern` matches the liveQuery tests. Moving the block exposed
+  two things that the nested version had masked (its trailing `await`s were
+  never actually awaited by vitest): (a) the for-await test's single
+  `await Promise.resolve()` is one microtask short — an async generator takes
+  two microtask turns to deliver its first yielded value — so both flushes
+  were switched to a deterministic macrotask
+  (`await new Promise((resolve) => setTimeout(resolve, 0))`); (b) the
+  'yields the initial result' test awaited a third delivery after unrelated
+  writes, which the (documented) result-diffing design never emits — it now
+  asserts non-delivery via `Promise.race` and that `query.current` is
+  unchanged, then stops the stream with `query.dispose()` instead of
+  `iterator.return()` (see the new return()-while-idle issue below). All
+  other assertions unchanged; each test still constructs its own db, so
+  isolation is unaffected. Validation: core typecheck green; live.test.ts
+  17/17 pass; full core suite green.
 
 
 ## [2026-08-14] react — P2 selector hooks land; design-doc live() selector signature differs from core
@@ -372,3 +392,26 @@ back to sub-agents for fixes.
   index.test.ts (+4). Validation: core build/typecheck/tests green (202
   tests), server build/typecheck/tests green (9 tests), client + examples
   typecheck green.
+
+## [2026-08-14] core — liveQuery iterator `return()`/`throw()` hang while the stream is idle-pending
+- **Task**: live.test.ts restructure (describe-inside-it fix)
+- **Found by**: live.test.ts restructure validation
+- **Severity**: medium
+- **Status**: open
+- **Description**: In `createLiveQueryResult` (packages/core/src/index.ts) the
+  async generator idles on `await new Promise((resolve) => { resolveNext =
+  resolve; })` when no change is queued. Per V8 async-generator semantics, a
+  `return()`/`throw()` call issued while the generator is suspended at that
+  `await` does not settle until the awaited promise itself resolves — which
+  happens only on the next notification or `dispose()`. So
+  `await iterator.return()` on an idle liveQuery stream hangs indefinitely
+  (verified in isolation), even though design/03 promises "iterator
+  `return()`/`throw()`/`dispose()` stop delivery". The old nested-in-`it`
+  tests never exercised this (their `await`s were never awaited by vitest);
+  the restructured standalone tests stop idle streams with `query.dispose()`
+  instead. `dispose()` and AbortSignal paths are unaffected (dispose resolves
+  `resolveNext`). Fix idea: give the generator a way to observe `return()`
+  (e.g. wrap the iterator with an explicit `return()` that triggers the
+  pending resolution, or resolve the idle await on a disposal flag), or
+  document that consumers must call `dispose()` rather than `return()`.
+- **Resolution**: none (documented; tests avoid the path for now).
