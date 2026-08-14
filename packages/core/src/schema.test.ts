@@ -68,13 +68,16 @@ describe('value type validation', () => {
 		expect(() => db.add(1, 'v/nul', 'x')).toThrow(/Invalid value type/);
 	});
 
-	it('unknown value type accepts anything', () => {
+	it('unknown value type accepts anything supported', () => {
 		const db = createDatabase();
 		db.transact([{ ident: 'v/any', valueType: 'unknown', cardinality: 'one' }]);
-		const values = ['x', 1, true, null, { nested: true }];
+		const values = ['x', 1, true, null, new Date(0), 10n, [1, 2]];
 		for (let i = 0; i < values.length; i += 1) {
 			expect(() => db.add(i + 1, 'v/any', values[i])).not.toThrow();
 		}
+
+		// opaque objects are rejected by the engine regardless of schema
+		expect(() => db.add(99, 'v/any', { nested: true })).toThrow(/opaque objects/);
 	});
 });
 

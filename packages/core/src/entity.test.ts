@@ -46,23 +46,19 @@ describe('entity state', () => {
 		expect(db.entity(1)).toEqual({ id: 1, a: 'y' });
 	});
 
-	it('round-trips opaque object and array values', () => {
+	it('rejects opaque object values and round-trips arrays', () => {
 		const db = createDatabase();
-		const value = { nested: { list: [1, 2] } };
-		db.add(1, 'payload', value);
-		expect(db.entity(1)).toEqual({ id: 1, payload: value });
+		expect(() => db.add(1, 'payload', { nested: { list: [1, 2] } })).toThrow(/opaque objects/);
+		const array = [1, 2];
+		db.add(1, 'payload', array);
+		expect(db.entity(1)).toEqual({ id: 1, payload: array });
 	});
 
-	it('uses Object.is semantics: -0 and +0 are distinct, NaN equals NaN', () => {
+	it('uses Object.is semantics for unconstrained attributes: -0 and +0 are distinct', () => {
 		const db = createDatabase();
 		db.add(1, 'n', 0);
 		db.retract(1, 'n', -0); // Object.is(0, -0) === false -> no-op
 		expect(db.entity(1)).toEqual({ id: 1, n: 0 });
-
-		const db2 = createDatabase();
-		db2.add(2, 'n', NaN);
-		db2.retract(2, 'n', NaN); // Object.is(NaN, NaN) === true -> removes
-		expect(db2.entity(2)).toBeNull();
 	});
 
 	it('returns id plus attributes with stable ordering', () => {

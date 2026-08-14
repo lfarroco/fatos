@@ -16,6 +16,66 @@ Format:
 
 ---
 
+## [2026-08-14] core — P0 value model & schema support (design/01) implemented
+- **Task**: P0 value model & schema support (docs/design/01-data-model.md, docs/design/04-phasing.md P0)
+- **Found by**: P0 value model implementation (packages/core)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Landed `ref()`/`temp()`/`lookupRef()` (Symbol-branded), tempid
+  resolution at commit, Date/BigInt values, opaque-object rejection,
+  NaN/±Infinity rejection, and `db/unique`/`db/ref` schema attributes with
+  `'value'` uniqueness + ref enforcement. Existing tests whose expectations
+  legitimately changed per the new rules were updated (see below); all other
+  tests stayed green. Design deviations/limitations recorded:
+  - **Arrays are kept verbatim as values** in P0. The data-model doc says
+    arrays "expand to cardinality-many facts" — that is the P1 `insert` object
+    grammar; the existing `add`/`transact` tuple surface stored arrays as
+    opaque values and that behavior was preserved (pinned by entity.test.ts
+    and the property suite). Documented as a P1 item.
+  - **Bare `temp()` in value position is rejected** ("temp() can only be used
+    as an entity id or wrapped in ref()"). The doc lists `temp()` as "usable as
+    a value", but storing an implicit id reference contradicts "a plain number
+    is never a reference"; callers must write `ref(temp(...))`. Revisit in P1.
+  - **`lookupRef()` is stored as-is** in P0 (branded object in the fact log);
+    resolution against `db/unique: 'identity'` is the P1 upsert.
+  - **Cardinality-one / unconstrained retract matching stays Object.is** (pinned
+    -0/+0 test). Consequence: retracting a Date or ref value requires the exact
+    stored reference; equal-ms Dates / equal-target refs match only on
+    cardinality-many attributes (value-key based). Consider value-key retract
+    matching in P1.
+  - **Datalog `query` constants are still `QueryTerm`-typed** (string/number/
+    boolean/null), so Date/BigInt/ref constants don't typecheck in `where`
+    clauses, and at runtime a Date constant matches only by reference on
+    cardinality-one attributes. `find()` matches Date/BigInt/ref by canonical
+    value key (ms epoch / bigint string / ref target) as required.
+  - **`db/unique: 'value'` enforcement is O(entities × facts)** per unique
+    attribute (walks the AEVT index); the risk-table "one extra index per
+    unique attribute, maintained at commit" optimization is deferred to P1.
+- **Resolution**: new value model in core/src/index.ts (brands, helpers,
+  validation, tempid resolution, schema unique/ref) + new values.test.ts
+  (32 tests). Validation: core build/typecheck/tests green (124 tests),
+  client/server typecheck + tests green, examples typecheck green.
+
+## [2026-08-14] core — existing-test expectation updates for the new value rules
+- **Task**: P0 value model (packages/core)
+- **Found by**: P0 value model implementation
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Tests that stored values the new rules reject were updated:
+  - entity.test.ts: "round-trips opaque object and array values" split —
+    opaque objects now throw (`/opaque objects/`), arrays still round-trip;
+    the Object.is test dropped its NaN half (NaN is no longer storable) and
+    now pins only -0/+0 distinctness for unconstrained attributes.
+  - properties.test.ts: NOTE_POOL dropped `{ nested: true }` and NaN; the
+    "accepts arbitrary values" arbitrary generator dropped `fc.constant({x:1})`.
+  - schema.test.ts: "unknown value type accepts anything" now uses supported
+    values (`new Date(0)`, `10n`, `[1, 2]`) and asserts opaque objects are
+    rejected regardless of schema.
+  - packages/schema-designer: its standalone `ValueType` union and
+    `isValueType` validator were extended with `'date' | 'bigint' | 'ref'` to
+    stay assignable with the widened core `ValueType` (examples typecheck
+    depends on it).
+
 ## [2026-08-13] core — benchmark targets missed for query & datalog join
 - **Task**: P0 benchmark (docs/design/04-phasing.md P0)
 - **Found by**: core P0 engine work, `npm run benchmark` (packages/core)

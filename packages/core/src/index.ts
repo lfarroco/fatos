@@ -14,6 +14,30 @@ export const version = '0.0.1';
 export type FactOperation = 'add' | 'retract';
 export type EntityId = number | string;
 
+/**
+ * Brand symbols for reference values. A value is a reference iff one of these
+ * symbols is present on it; a plain number is never a reference (design/01).
+ */
+export const REF_BRAND = Symbol('fatos/ref');
+export const TEMP_BRAND = Symbol('fatos/temp');
+export const LOOKUP_REF_BRAND = Symbol('fatos/lookupRef');
+
+export type ScalarValue = string | number | boolean | null;
+export type LookupRef = {
+	readonly [LOOKUP_REF_BRAND]: readonly [attribute: string, value: ScalarValue];
+};
+export type TempHandle = {
+	readonly [TEMP_BRAND]: string;
+};
+export type RefTarget = EntityId | TempHandle | LookupRef;
+export type Ref = {
+	readonly [REF_BRAND]: RefTarget;
+};
+export type RefValue = Ref | TempHandle | LookupRef;
+
+/** The set of values the engine accepts at transaction time (arrays are kept verbatim). */
+export type Value = string | number | boolean | null | Date | bigint | RefValue | unknown[];
+
 export type Fact = readonly [
 	eid: EntityId,
 	attribute: string,
@@ -28,6 +52,10 @@ export type TransactionRecord = readonly [
 	metadata: Record<string, unknown> | null
 ];
 
+/** Entity id position that accepts tempids (negative numbers and temp() handles). */
+export type InputEid = EntityId | TempHandle;
+
+/** A resolved (committed) mutation: tempids have been replaced with entity ids. */
 export type Mutation = readonly [
 	op: FactOperation,
 	eid: EntityId,
@@ -35,22 +63,33 @@ export type Mutation = readonly [
 	value: unknown
 ];
 
-export type FactTuple = readonly [
-	eid: EntityId,
+/** A mutation as supplied by the caller; tempids are still allowed. */
+export type MutationInput = readonly [
+	op: FactOperation,
+	eid: InputEid,
 	attribute: string,
 	value: unknown
 ];
 
-export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'unknown';
+export type FactTuple = readonly [
+	eid: InputEid,
+	attribute: string,
+	value: unknown
+];
+
+export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'date' | 'bigint' | 'ref' | 'unknown';
 export type Cardinality = 'one' | 'many';
+export type Unique = 'identity' | 'value';
 
 export type SchemaDeclaration = {
 	ident: string;
 	valueType: ValueType;
 	cardinality: Cardinality;
+	unique?: Unique;
+	ref?: boolean;
 };
 
-export type TransactionEntry = Mutation | SchemaDeclaration;
+export type TransactionEntry = MutationInput | SchemaDeclaration;
 export type TransactionEntryInput = TransactionEntry | FactTuple;
 
 type AttributeSchema = {
@@ -58,6 +97,8 @@ type AttributeSchema = {
 	ident: string;
 	valueType: ValueType;
 	cardinality: Cardinality;
+	unique?: Unique;
+	ref?: boolean;
 };
 
 export type SchemaInfo = {
@@ -65,6 +106,8 @@ export type SchemaInfo = {
 	ident: string;
 	valueType: ValueType;
 	cardinality: Cardinality;
+	unique?: Unique;
+	ref?: boolean;
 };
 
 export type QueryTerm = string | number | boolean | null;
@@ -84,9 +127,95 @@ function normalizeTxLimit(tx?: number): number {
 	return tx ?? Number.POSITIVE_INFINITY;
 }
 
+/**
+ * Creates a reference to an entity. Accepts a plain id, a `temp()` handle, or a
+ * `lookupRef()`. A plain number is never a reference — callers must wrap it.
+ */
+export function ref(target: RefTarget): Ref {
+	if (typeof target === 'number' && Number.isNaN(target)) {
+		throw new Error('ref() target cannot be NaN');
+	}
+
+	if (
+		typeof target !== 'number' &&
+		typeof target !== 'string' &&
+		!isTemp(target) &&
+		!isLookupRef(target)
+	) {
+		throw new Error('ref() expects an entity id, temp(), or lookupRef()');
+	}
+
+	return Object.freeze({ [REF_BRAND]: target });
+}
+
+let tempCounter = 0;
+
+/**
+ * Creates a tempid handle for use inside a single transaction. Repeated uses of
+ * the same label (or the same handle object) within one transaction resolve to
+ * the same fresh entity id.
+ */
+export function temp(label?: string): TempHandle {
+	return Object.freeze({ [TEMP_BRAND]: label ?? `temp-${tempCounter++}` });
+}
+
+/**
+ * References an entity by a unique attribute value (enables `db/unique:
+ * 'identity'` upserts in P1). Stored as-is in P0.
+ */
+export function lookupRef(pair: readonly [attribute: string, value: ScalarValue]): LookupRef {
+	if (typeof pair[0] !== 'string' || !isScalarValue(pair[1])) {
+		throw new Error('lookupRef() expects [attribute, scalar value]');
+	}
+
+	return Object.freeze({ [LOOKUP_REF_BRAND]: Object.freeze([pair[0], pair[1]] as const) });
+}
+
+function isScalarValue(value: unknown): value is ScalarValue {
+	return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+export function isRef(value: unknown): value is Ref {
+	return typeof value === 'object' && value !== null && REF_BRAND in value;
+}
+
+export function isTemp(value: unknown): value is TempHandle {
+	return typeof value === 'object' && value !== null && TEMP_BRAND in value;
+}
+
+export function isLookupRef(value: unknown): value is LookupRef {
+	return typeof value === 'object' && value !== null && LOOKUP_REF_BRAND in value;
+}
+
+/**
+ * Canonical identity key for a stored value. Used by the AVET index, entity
+ * state dedup (cardinality-many), find matching, and unique-constraint
+ * tracking. Date is keyed by ms epoch, BigInt by its string form, refs by
+ * their target.
+ */
 function valueKey(value: unknown): string {
 	if (value === null) {
 		return 'null';
+	}
+
+	if (value instanceof Date) {
+		return `date:${value.getTime()}`;
+	}
+
+	if (typeof value === 'bigint') {
+		return `bigint:${value.toString()}`;
+	}
+
+	if (isRef(value)) {
+		return `ref:${refTargetKey(value[REF_BRAND])}`;
+	}
+
+	if (isTemp(value)) {
+		return `temp:${value[TEMP_BRAND]}`;
+	}
+
+	if (isLookupRef(value)) {
+		return `lookupRef:${value[LOOKUP_REF_BRAND][0]}:${valueKey(value[LOOKUP_REF_BRAND][1])}`;
 	}
 
 	const type = typeof value;
@@ -95,6 +224,61 @@ function valueKey(value: unknown): string {
 	}
 
 	return `${type}:${String(value)}`;
+}
+
+function refTargetKey(target: RefTarget): string {
+	if (isTemp(target)) {
+		return `temp:${target[TEMP_BRAND]}`;
+	}
+
+	if (isLookupRef(target)) {
+		return `lookupRef:${target[LOOKUP_REF_BRAND][0]}:${valueKey(target[LOOKUP_REF_BRAND][1])}`;
+	}
+
+	return `${typeof target}:${String(target)}`;
+}
+
+/** Value equality for read-side matching (find criteria, many-attribute dedup). */
+function sameValue(left: unknown, right: unknown): boolean {
+	return valueKey(left) === valueKey(right);
+}
+
+/**
+ * Rejects values the data model does not support, at transaction time:
+ * NaN / ±Infinity numbers, invalid Dates, opaque objects, and non-values
+ * (undefined / functions / symbols). Branded refs/tempids/lookupRefs and
+ * arrays are allowed.
+ */
+function assertSupportedValue(value: unknown, attribute: string): void {
+	if (value === undefined) {
+		throw new Error(`Invalid value for ${attribute}: undefined is not a supported value`);
+	}
+
+	if (typeof value === 'number' && !Number.isFinite(value)) {
+		throw new Error(`Invalid number for ${attribute}: NaN and ±Infinity are not supported`);
+	}
+
+	if (value instanceof Date && Number.isNaN(value.getTime())) {
+		throw new Error(`Invalid date for ${attribute}: Date with NaN time is not supported`);
+	}
+
+	if (
+		typeof value === 'object' &&
+		value !== null &&
+		!(value instanceof Date) &&
+		!Array.isArray(value) &&
+		!isRef(value) &&
+		!isTemp(value) &&
+		!isLookupRef(value)
+	) {
+		throw new Error(
+			`Invalid value for ${attribute}: opaque objects are not supported (use ref()/temp()/lookupRef() or a scalar)`
+		);
+	}
+
+	if (typeof value === 'function' || typeof value === 'symbol') {
+		throw new Error(`Invalid value for ${attribute}: ${typeof value} is not a supported value`);
+	}
 }
 
 function isVariable(term: QueryTerm): term is string {
@@ -149,7 +333,7 @@ function isSchemaDeclaration(entry: TransactionEntryInput): entry is SchemaDecla
 	return !Array.isArray(entry);
 }
 
-function isMutation(entry: TransactionEntryInput): entry is Mutation {
+function isMutation(entry: TransactionEntryInput): entry is MutationInput {
 	return Array.isArray(entry) && entry.length === 4 && (entry[0] === 'add' || entry[0] === 'retract');
 }
 
@@ -158,15 +342,20 @@ function isFactTuple(entry: TransactionEntryInput): entry is FactTuple {
 }
 
 function matchesValueType(value: unknown, valueType: ValueType): boolean {
-	if (valueType === 'unknown') {
-		return true;
+	switch (valueType) {
+		case 'unknown':
+			return true;
+		case 'null':
+			return value === null;
+		case 'date':
+			return value instanceof Date;
+		case 'bigint':
+			return typeof value === 'bigint';
+		case 'ref':
+			return isRef(value) || isLookupRef(value);
+		default:
+			return typeof value === valueType;
 	}
-
-	if (valueType === 'null') {
-		return value === null;
-	}
-
-	return typeof value === valueType;
 }
 
 export class FactDatabase {
@@ -177,6 +366,7 @@ export class FactDatabase {
 	private avet: AVETIndex = new Map();
 	private nextTx = 1;
 	private nextSchemaEid = -1;
+	private nextEntityEid = 1;
 	private attributeSchemas = new Map<string, AttributeSchema>();
 	private schemaByIdent = new Map<string, number>();
 
@@ -214,22 +404,22 @@ export class FactDatabase {
 		return fact;
 	}
 
-	add(eid: EntityId, attribute: string, value: unknown): Fact;
+	add(eid: InputEid, attribute: string, value: unknown): Fact;
 	add(tuple: FactTuple): Fact;
-	add(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
-		const mutation = Array.isArray(eidOrTuple)
-			? ['add', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]] as const
-			: ['add', eidOrTuple, attribute as string, value] as const;
+	add(eidOrTuple: InputEid | FactTuple, attribute?: string, value?: unknown): Fact {
+		const mutation: MutationInput = Array.isArray(eidOrTuple)
+			? ['add', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]]
+			: ['add', eidOrTuple, attribute as string, value];
 		const facts = this.transact([mutation]);
 		return facts[0] as Fact;
 	}
 
-	retract(eid: EntityId, attribute: string, value: unknown): Fact;
+	retract(eid: InputEid, attribute: string, value: unknown): Fact;
 	retract(tuple: FactTuple): Fact;
-	retract(eidOrTuple: EntityId | FactTuple, attribute?: string, value?: unknown): Fact {
-		const mutation = Array.isArray(eidOrTuple)
-			? ['retract', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]] as const
-			: ['retract', eidOrTuple, attribute as string, value] as const;
+	retract(eidOrTuple: InputEid | FactTuple, attribute?: string, value?: unknown): Fact {
+		const mutation: MutationInput = Array.isArray(eidOrTuple)
+			? ['retract', eidOrTuple[0], eidOrTuple[1], eidOrTuple[2]]
+			: ['retract', eidOrTuple, attribute as string, value];
 		const facts = this.transact([mutation]);
 		return facts[0] as Fact;
 	}
@@ -240,23 +430,25 @@ export class FactDatabase {
 		}
 
 		const mutations: Mutation[] = [];
+		const tempids = new Map<string, number>();
+
 		for (const entry of entries) {
 			if (isSchemaDeclaration(entry)) {
+				// Schema facts carry internal negative eids; they are never tempids.
 				mutations.push(...this.schemaDeclarationToFacts(entry));
 				continue;
 			}
 
+			let input: MutationInput;
 			if (isFactTuple(entry)) {
-				mutations.push(['add', entry[0], entry[1], entry[2]]);
-				continue;
+				input = ['add', entry[0], entry[1], entry[2]];
+			} else if (isMutation(entry)) {
+				input = entry;
+			} else {
+				throw new Error('Invalid transaction entry format');
 			}
 
-			if (isMutation(entry)) {
-				mutations.push(entry);
-				continue;
-			}
-
-			throw new Error('Invalid transaction entry format');
+			mutations.push(this.resolveTempids(input, tempids));
 		}
 
 		this.validateMutations(mutations);
@@ -267,6 +459,64 @@ export class FactDatabase {
 			this.onFactCommitted(fact);
 			return fact;
 		});
+	}
+
+	/**
+	 * Resolves tempids (negative entity ids and temp() handles) to fresh positive
+	 * entity ids. Repeated occurrences of the same tempid within this transaction
+	 * resolve to the same id; the mapping is scoped to the transaction.
+	 */
+	private resolveTempids(mutation: MutationInput, tempids: Map<string, number>): Mutation {
+		return [mutation[0], this.resolveEid(mutation[1], tempids), mutation[2], this.resolveValue(mutation[3], tempids)];
+	}
+
+	private resolveEid(eid: InputEid, tempids: Map<string, number>): EntityId {
+		if (typeof eid === 'number') {
+			return eid < 0 ? this.tempidId(`n:${eid}`, tempids) : eid;
+		}
+
+		if (isTemp(eid)) {
+			return this.tempidId(`t:${eid[TEMP_BRAND]}`, tempids);
+		}
+
+		return eid;
+	}
+
+	private resolveValue(value: unknown, tempids: Map<string, number>): unknown {
+		if (isTemp(value)) {
+			throw new Error('temp() can only be used as an entity id or wrapped in ref()');
+		}
+
+		if (!isRef(value)) {
+			return value;
+		}
+
+		const target = value[REF_BRAND];
+		if (isTemp(target)) {
+			return ref(this.tempidId(`t:${target[TEMP_BRAND]}`, tempids));
+		}
+
+		if (typeof target === 'number' && target < 0) {
+			return ref(this.tempidId(`n:${target}`, tempids));
+		}
+
+		return value;
+	}
+
+	private tempidId(key: string, tempids: Map<string, number>): number {
+		const existing = tempids.get(key);
+		if (existing !== undefined) {
+			return existing;
+		}
+
+		while (this.eavt.has(this.nextEntityEid)) {
+			this.nextEntityEid += 1;
+		}
+
+		const id = this.nextEntityEid;
+		this.nextEntityEid += 1;
+		tempids.set(key, id);
+		return id;
 	}
 
 	getFacts(): readonly Fact[] {
@@ -323,7 +573,9 @@ export class FactDatabase {
 			eid: schema.eid,
 			ident: schema.ident,
 			valueType: schema.valueType,
-			cardinality: schema.cardinality
+			cardinality: schema.cardinality,
+			unique: schema.unique,
+			ref: schema.ref
 		};
 	}
 
@@ -333,7 +585,9 @@ export class FactDatabase {
 				eid: schema.eid,
 				ident: schema.ident,
 				valueType: schema.valueType,
-				cardinality: schema.cardinality
+				cardinality: schema.cardinality,
+				unique: schema.unique,
+				ref: schema.ref
 			}))
 			.sort((left, right) => left.ident.localeCompare(right.ident));
 	}
@@ -356,12 +610,12 @@ export class FactDatabase {
 				const schema = this.attributeSchemas.get(attribute);
 				if (schema?.cardinality === 'many') {
 					const current = state.get(attribute);
-					const values = current instanceof Set ? current : new Set<unknown>();
+					const values = current instanceof Map ? current : new Map<string, unknown>();
 
 					if (op === 'add') {
-						values.add(value);
+						values.set(valueKey(value), value);
 					} else {
-						values.delete(value);
+						values.delete(valueKey(value));
 					}
 
 					if (values.size === 0) {
@@ -386,7 +640,7 @@ export class FactDatabase {
 
 		const entity: EntityState = { id: eid };
 		for (const [attribute, value] of state) {
-			entity[attribute] = value instanceof Set ? Object.freeze(Array.from(value)) : value;
+			entity[attribute] = value instanceof Map ? Object.freeze(Array.from(value.values())) : value;
 		}
 
 		return Object.freeze(entity);
@@ -402,7 +656,7 @@ export class FactDatabase {
 				continue;
 			}
 
-			const doesMatch = Object.entries(criteria).every(([key, value]) => Object.is(entity[key], value));
+			const doesMatch = Object.entries(criteria).every(([key, value]) => sameValue(entity[key], value));
 			if (doesMatch) {
 				matches.push(entity);
 			}
@@ -434,27 +688,11 @@ export class FactDatabase {
 				continue;
 			}
 
-			if (isQueryTerm(value)) {
-				const valueFacts = this.avet.get(key)?.get(valueKey(value));
-				if (valueFacts) {
-					for (const fact of valueFacts) {
-						if (fact[3] <= txLimit) {
-							eids.add(fact[0]);
-						}
-					}
-				}
-				sets.push(eids);
-				continue;
-			}
-
-			const attributeEntities = this.aevt.get(key);
-			if (attributeEntities) {
-				for (const [eid, facts] of attributeEntities) {
-					for (const fact of facts) {
-						if (fact[3] <= txLimit) {
-							eids.add(eid);
-							break;
-						}
+			const valueFacts = this.avet.get(key)?.get(valueKey(value));
+			if (valueFacts) {
+				for (const fact of valueFacts) {
+					if (fact[3] <= txLimit) {
+						eids.add(fact[0]);
 					}
 				}
 			}
@@ -690,8 +928,10 @@ export class FactDatabase {
 
 	/**
 	 * True when the entity's active value(s) for `attribute` as of `txLimit`
-	 * include `value` (Object.is semantics, cardinality-many included). Mirrors
-	 * attributeValues + clauseTriples' constant filter without allocating.
+	 * include `value`. Cardinality-many matching uses the canonical value key
+	 * (consistent with state reconstruction); everything else keeps Object.is
+	 * semantics. Mirrors attributeValues + clauseTriples' constant filter
+	 * without allocating.
 	 */
 	private hasAttributeValue(eid: EntityId, attribute: string, value: QueryTerm, txLimit: number): boolean {
 		const facts = this.eavt.get(eid)?.get(attribute);
@@ -707,11 +947,12 @@ export class FactDatabase {
 					continue;
 				}
 
+				const matches = sameValue(factValue, value);
 				if (op === 'add') {
-					if (Object.is(factValue, value)) {
+					if (matches) {
 						present = true;
 					}
-				} else if (Object.is(factValue, value)) {
+				} else if (matches) {
 					present = false;
 				}
 			}
@@ -798,19 +1039,19 @@ export class FactDatabase {
 
 		const schema = this.attributeSchemas.get(attribute);
 		if (schema?.cardinality === 'many') {
-			const values = new Set<unknown>();
+			const values = new Map<string, unknown>();
 			for (const [, , value, factTx, op] of facts) {
 				if (factTx > txLimit) {
 					continue;
 				}
 
 				if (op === 'add') {
-					values.add(value);
+					values.set(valueKey(value), value);
 				} else {
-					values.delete(value);
+					values.delete(valueKey(value));
 				}
 			}
-			return Array.from(values);
+			return Array.from(values.values());
 		}
 
 		let current: unknown;
@@ -836,15 +1077,42 @@ export class FactDatabase {
 				throw new Error(`Schema conflict for ${schema.ident}`);
 			}
 
-			return [];
+			if (
+				schema.unique !== undefined &&
+				existingSchema.unique !== undefined &&
+				schema.unique !== existingSchema.unique
+			) {
+				throw new Error(`Schema conflict for ${schema.ident}: unique constraint mismatch`);
+			}
+
+			if (schema.ref !== undefined && existingSchema.ref !== undefined && schema.ref !== existingSchema.ref) {
+				throw new Error(`Schema conflict for ${schema.ident}: ref mismatch`);
+			}
+
+			// Re-declaration: append only the schema facts that actually change.
+			const facts: Mutation[] = [];
+			if (schema.unique !== undefined && existingSchema.unique !== schema.unique) {
+				facts.push(['add', existingSchema.eid, 'db/unique', schema.unique]);
+			}
+			if (schema.ref !== undefined && existingSchema.ref !== schema.ref) {
+				facts.push(['add', existingSchema.eid, 'db/ref', schema.ref]);
+			}
+			return facts;
 		}
 
 		const schemaEid = this.nextSchemaEid--;
-		return [
+		const facts: Mutation[] = [
 			['add', schemaEid, 'db/ident', schema.ident],
 			['add', schemaEid, 'db/valueType', schema.valueType],
 			['add', schemaEid, 'db/cardinality', schema.cardinality]
 		];
+		if (schema.unique !== undefined) {
+			facts.push(['add', schemaEid, 'db/unique', schema.unique]);
+		}
+		if (schema.ref !== undefined) {
+			facts.push(['add', schemaEid, 'db/ref', schema.ref]);
+		}
+		return facts;
 	}
 
 	private onFactCommitted(fact: Fact): void {
@@ -881,13 +1149,26 @@ export class FactDatabase {
 		if (attribute === 'db/cardinality' && (value === 'one' || value === 'many')) {
 			schema.cardinality = value;
 		}
+
+		if (attribute === 'db/unique' && (value === 'identity' || value === 'value')) {
+			schema.unique = value;
+		}
+
+		if (attribute === 'db/ref' && typeof value === 'boolean') {
+			schema.ref = value;
+		}
 	}
 
 	private validateMutations(mutations: Mutation[]): void {
-		const manyState = new Map<string, Set<unknown>>();
+		const manyState = new Map<string, Map<string, unknown>>();
 		const oneState = new Map<string, unknown>();
+		const uniqueState = new Map<string, Map<string, Set<EntityId>>>();
 
 		for (const [op, eid, attribute, value] of mutations) {
+			// Value-level rules apply to every write, schema or not: no opaque
+			// objects, no NaN / ±Infinity, no invalid Dates.
+			assertSupportedValue(value, attribute);
+
 			const schema = this.attributeSchemas.get(attribute);
 			if (!schema) {
 				continue;
@@ -897,13 +1178,23 @@ export class FactDatabase {
 				throw new Error(`Invalid value type for ${attribute}. Expected ${schema.valueType}`);
 			}
 
+			if ((schema.ref === true || schema.valueType === 'ref') && !isRef(value) && !isLookupRef(value)) {
+				throw new Error(`Invalid value for ${attribute}: expected a ref() or lookupRef() value`);
+			}
+
+			if (schema.unique === 'value') {
+				this.enforceUniqueValue(attribute, eid, value, op, uniqueState);
+			}
+
 			const key = `${eid}:${attribute}`;
 			if (schema.cardinality === 'many') {
-				const current = manyState.get(key) ?? new Set(this.activeValues(eid, attribute));
+				const current =
+					manyState.get(key) ??
+					new Map(this.activeValues(eid, attribute).map((v) => [valueKey(v), v] as const));
 				if (op === 'add') {
-					current.add(value);
+					current.set(valueKey(value), value);
 				} else {
-					current.delete(value);
+					current.delete(valueKey(value));
 				}
 				manyState.set(key, current);
 				continue;
@@ -924,35 +1215,61 @@ export class FactDatabase {
 		}
 	}
 
+	/**
+	 * Enforces `db/unique: 'value'`: the value may be active on at most one
+	 * entity. Same-entity re-adds are allowed (they are no-ops); the holder set
+	 * is tracked across the transaction so duplicates within one tx are caught.
+	 */
+	private enforceUniqueValue(
+		attribute: string,
+		eid: EntityId,
+		value: unknown,
+		op: FactOperation,
+		uniqueState: Map<string, Map<string, Set<EntityId>>>
+	): void {
+		const holders = uniqueState.get(attribute) ?? this.activeUniqueHolders(attribute);
+		const valueKeyString = valueKey(value);
+		const valueHolders = holders.get(valueKeyString) ?? new Set<EntityId>();
+
+		if (op === 'add') {
+			if (valueHolders.size > 0 && !(valueHolders.size === 1 && valueHolders.has(eid))) {
+				throw new Error(`Unique constraint violation for ${attribute}: value already exists`);
+			}
+			valueHolders.add(eid);
+		} else {
+			valueHolders.delete(eid);
+		}
+
+		if (valueHolders.size === 0) {
+			holders.delete(valueKeyString);
+		} else {
+			holders.set(valueKeyString, valueHolders);
+		}
+		uniqueState.set(attribute, holders);
+	}
+
+	/** Active (entity, value) holders for a unique attribute across all entities. */
+	private activeUniqueHolders(attribute: string): Map<string, Set<EntityId>> {
+		const holders = new Map<string, Set<EntityId>>();
+		const attributeEntities = this.aevt.get(attribute);
+		if (!attributeEntities) {
+			return holders;
+		}
+
+		for (const [eid] of attributeEntities) {
+			for (const value of this.attributeValues(eid, attribute, Number.POSITIVE_INFINITY)) {
+				const valueKeyString = valueKey(value);
+				const valueHolders = holders.get(valueKeyString) ?? new Set<EntityId>();
+				valueHolders.add(eid);
+				holders.set(valueKeyString, valueHolders);
+			}
+		}
+
+		return holders;
+	}
+
 	private activeValues(eid: EntityId, attribute: string): unknown[] {
-		const facts = this.eavt.get(eid)?.get(attribute);
-		if (!facts) {
-			return [];
-		}
-
-		const schema = this.attributeSchemas.get(attribute);
-		if (schema?.cardinality === 'many') {
-			const values = new Set<unknown>();
-			for (const [, , value, , op] of facts) {
-				if (op === 'add') {
-					values.add(value);
-				} else {
-					values.delete(value);
-				}
-			}
-			return Array.from(values);
-		}
-
-		let current: unknown;
-		for (const [, , value, , op] of facts) {
-			if (op === 'add') {
-				current = value;
-			} else if (current !== undefined && Object.is(current, value)) {
-				current = undefined;
-			}
-		}
-
-		return current === undefined ? [] : [current];
+		return this.attributeValues(eid, attribute, Number.POSITIVE_INFINITY);
 	}
 }
 

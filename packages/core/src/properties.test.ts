@@ -290,7 +290,7 @@ const PLAN_ARB: fc.Arbitrary<Plan> = fc.record({
 });
 
 // Deterministic per-index value used for attrs without a schema-one fixed value.
-const NOTE_POOL: unknown[] = ['hello', 42, true, null, [1, 2], { nested: true }, 0, -0, NaN];
+const NOTE_POOL: unknown[] = ['hello', 42, true, null, [1, 2], 0, -0];
 
 function valueForOp(attr: string, i: number): unknown {
 	switch (attr) {
@@ -491,8 +491,7 @@ describe('property: total behavior with arbitrary values', () => {
 							fc.string({ maxLength: 6 }),
 							fc.boolean(),
 							fc.constant(null),
-							fc.constant([1, 2]),
-							fc.constant({ x: 1 })
+							fc.constant([1, 2])
 						)
 					}),
 					{ minLength: 0, maxLength: 40 }

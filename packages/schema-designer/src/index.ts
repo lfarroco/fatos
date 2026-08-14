@@ -6,7 +6,7 @@
 
 export const version = '0.0.1';
 
-export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'unknown';
+export type ValueType = 'string' | 'number' | 'boolean' | 'null' | 'date' | 'bigint' | 'ref' | 'unknown';
 export type Cardinality = 'one' | 'many';
 
 export type SchemaInfo = {
@@ -100,7 +100,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isValueType(value: unknown): value is ValueType {
-	return value === 'string' || value === 'number' || value === 'boolean' || value === 'null' || value === 'unknown';
+	return (
+		value === 'string' ||
+		value === 'number' ||
+		value === 'boolean' ||
+		value === 'null' ||
+		value === 'date' ||
+		value === 'bigint' ||
+		value === 'ref' ||
+		value === 'unknown'
+	);
 }
 
 function isCardinality(value: unknown): value is Cardinality {
