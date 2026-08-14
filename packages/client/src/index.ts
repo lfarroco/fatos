@@ -15,6 +15,9 @@ import {
 	type Fact,
 	type FactTuple,
 	type FactDatabase,
+	type LiveQueryOptions,
+	type LiveQueryResult,
+	type LiveResult,
 	type Mutation,
 	type QuerySpec,
 	type QueryTerm,
@@ -31,28 +34,99 @@ export type Unsubscribe = () => void;
 
 type Listener = () => void;
 
+/** Event names dispatched by {@link FatosClient} on writes (design/03). */
+export const FACT_ADDED_EVENT = 'fact:added' as const;
+export const FACT_RETRACTED_EVENT = 'fact:retracted' as const;
+export const TRANSACTION_COMMITTED_EVENT = 'transaction:committed' as const;
+
+/**
+ * Base class for every Fatos client event (design/03). Subclasses add typed
+ * payload properties (`.fact`, `.transaction`, `.facts`); the raw payload is
+ * always available as `detail`.
+ */
+export class FatosEvent<D = unknown> extends Event {
+	readonly detail: D;
+
+	constructor(type: string, detail: D) {
+		super(type);
+		this.detail = detail;
+	}
+}
+
+/** Fired per fact written by `add`, `retract`, or `transact`. */
+export class FactEvent extends FatosEvent<{ fact: Fact }> {
+	readonly fact: Fact;
+
+	constructor(type: typeof FACT_ADDED_EVENT | typeof FACT_RETRACTED_EVENT, fact: Fact) {
+		super(type, { fact });
+		this.fact = fact;
+	}
+}
+
+/** Fired once per committed transaction carrying the record and its facts. */
+export class TransactionEvent extends FatosEvent<{ transaction: TransactionRecord; facts: readonly Fact[] }> {
+	readonly transaction: TransactionRecord;
+	readonly facts: readonly Fact[];
+
+	constructor(transaction: TransactionRecord, facts: readonly Fact[]) {
+		super(TRANSACTION_COMMITTED_EVENT, { transaction, facts });
+		this.transaction = transaction;
+		this.facts = facts;
+	}
+}
+
 function stableKey(value: unknown): string {
 	return JSON.stringify(value);
 }
 
-export class FatosClient {
+/** True when the object has the `find`/`where` shape of a QuerySpec. */
+function isQuerySpec(value: QuerySpec | Record<string, unknown>): value is QuerySpec {
+	return 'find' in value && 'where' in value;
+}
+
+/** Narrowing predicate for the explicit-dependency `live(deps, fn)` form. */
+function isStringArray(value: unknown): value is readonly string[] {
+	return Array.isArray(value);
+}
+
+export class FatosClient extends EventTarget {
 	private db: FactDatabase;
-	private listeners = new Set<Listener>();
 
 	constructor(db?: FactDatabase) {
+		super();
 		this.db = db ?? createDatabase();
 	}
 
+	/**
+	 * Sugar over `addEventListener('transaction:committed', ...)` — fires after
+	 * every write that commits at least one fact (design/03).
+	 */
 	subscribe(listener: Listener): Unsubscribe {
-		this.listeners.add(listener);
+		const handler = (): void => {
+			listener();
+		};
+		this.addEventListener(TRANSACTION_COMMITTED_EVENT, handler);
 		return () => {
-			this.listeners.delete(listener);
+			this.removeEventListener(TRANSACTION_COMMITTED_EVENT, handler);
 		};
 	}
 
-	private notify(): void {
-		for (const listener of this.listeners) {
-			listener();
+	/** Dispatches per-fact events followed by `transaction:committed` (design/03). */
+	private emitCommitted(facts: readonly Fact[]): void {
+		if (facts.length === 0) {
+			return;
+		}
+
+		for (const fact of facts) {
+			this.dispatchEvent(
+				new FactEvent(fact[4] === 'retract' ? FACT_RETRACTED_EVENT : FACT_ADDED_EVENT, fact)
+			);
+		}
+
+		const transactions = this.db.getTransactions();
+		const transaction = transactions[transactions.length - 1];
+		if (transaction !== undefined) {
+			this.dispatchEvent(new TransactionEvent(transaction, facts));
 		}
 	}
 
@@ -66,7 +140,7 @@ export class FatosClient {
 		} else {
 			fact = this.db.add(eidOrTuple as EntityId, attribute as string, value);
 		}
-		this.notify();
+		this.emitCommitted([fact]);
 		return fact;
 	}
 
@@ -80,15 +154,13 @@ export class FatosClient {
 		} else {
 			fact = this.db.retract(eidOrTuple as EntityId, attribute as string, value);
 		}
-		this.notify();
+		this.emitCommitted([fact]);
 		return fact;
 	}
 
 	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
 		const facts = this.db.transact(entries, metadata);
-		if (facts.length > 0) {
-			this.notify();
-		}
+		this.emitCommitted(facts);
 		return facts;
 	}
 
@@ -134,6 +206,54 @@ export class FatosClient {
 
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
 		return this.db.query(spec, tx);
+	}
+
+	/**
+	 * Live query (design/03), delegated to the underlying core database:
+	 * memoized `current` result plus change subscription. Three forms —
+	 * `live(fn)` access tracking, `live(deps, fn)` explicit dependencies, and
+	 * `live(specOrCriteria)` direct QuerySpec / find-criteria form.
+	 */
+	live<T>(fn: () => T): LiveResult<T>;
+	live<T>(deps: readonly string[], fn: () => T): LiveResult<T>;
+	live(spec: QuerySpec): LiveResult<QueryTerm[][]>;
+	live(criteria: Record<string, unknown>): LiveResult<EntityState[]>;
+	live<T>(
+		input: (() => T) | readonly string[] | QuerySpec | Record<string, unknown>,
+		fn?: () => T
+	): LiveResult<T> | LiveResult<QueryTerm[][]> | LiveResult<EntityState[]> {
+		// Delegate per form so the core overloads resolve unambiguously.
+		if (typeof input === 'function') {
+			return this.db.live(input);
+		}
+
+		if (isStringArray(input)) {
+			if (fn === undefined) {
+				throw new Error('live(deps, fn) requires a selector function');
+			}
+			return this.db.live(input, fn);
+		}
+
+		if (isQuerySpec(input)) {
+			return this.db.live(input);
+		}
+
+		return this.db.live(input);
+	}
+
+	/**
+	 * Live query as an async iterable (design/03), delegated to the underlying
+	 * core database: yields the initial result, then each subsequent change.
+	 * Cancellation via `AbortSignal`, iterator `return()`/`throw()`, or
+	 * `dispose()`.
+	 */
+	liveQuery(spec: QuerySpec, options?: LiveQueryOptions): LiveQueryResult<QueryTerm[][]>;
+	liveQuery(criteria: Record<string, unknown>, options?: LiveQueryOptions): LiveQueryResult<EntityState[]>;
+	liveQuery<T>(
+		input: QuerySpec | Record<string, unknown>,
+		options?: LiveQueryOptions
+	): LiveQueryResult<T> | LiveQueryResult<QueryTerm[][]> | LiveQueryResult<EntityState[]> {
+		return this.db.liveQuery(input, options);
 	}
 
 	atTransaction(tx: number) {
@@ -218,6 +338,9 @@ export type {
 	Fact,
 	FactTuple,
 	FactDatabase,
+	LiveQueryOptions,
+	LiveQueryResult,
+	LiveResult,
 	Mutation,
 	QuerySpec,
 	QueryTerm,

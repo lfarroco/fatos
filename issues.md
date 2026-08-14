@@ -267,3 +267,27 @@ back to sub-agents for fixes.
   new live.test.ts (12 tests). Validation: core build/typecheck/tests green
   (179 tests), benchmark targets all PASS with no regression.
 
+## [2026-08-14] core — live.test.ts has a describe() nested inside an it() callback
+- **Task**: P2 client half (EventTarget + live/liveQuery delegation, packages/client only)
+- **Found by**: P2 client implementation (packages/client)
+- **Severity**: medium
+- **Status**: open
+- **Description**: In `packages/core/src/live.test.ts`, `describe('db.liveQuery',
+  ...)` (line 245) is nested inside the `it('stops tracking and keeps current
+  read-safe after dispose', ...)` callback (opened at line 229); the trailing
+  `});` pairs close the nested describe and the outer `it`, so all five
+  liveQuery tests (initial-result, for-await, AbortSignal, already-aborted,
+  current/subscribe/dispose) register/execute inside the 'stops tracking'
+  test's execution context rather than as top-level tests. Symptoms observed
+  while implementing the client half of P2: vitest reports 12 tests for the
+  file although it contains 17 `it(...)` calls; `--testNamePattern` never
+  matches any of the nested tests; and the for-await liveQuery test's
+  microtask timing is entangled with the outer test — a verbatim copy of that
+  test in a fresh file needs two microtask turns for the first yielded value,
+  while the nested version passes with one. The nested tests pass today, but
+  the structure violates vitest's collection model and is fragile. Out of
+  scope for the client-only P2 task; left for a core-package cleanup (the
+  closing `});` of `it('stops tracking...')` should move before the
+  `describe('db.liveQuery', ...)` block).
+- **Resolution**: none (noted; core untouched in this run).
+
