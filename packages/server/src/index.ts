@@ -91,7 +91,7 @@ function parseQueryValue(raw: string): unknown {
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
-	for await (const chunk of req) {
+	for await (const chunk of req as AsyncIterable<Buffer | string>) {
 		if (typeof chunk === 'string') {
 			chunks.push(Buffer.from(chunk));
 			continue;
@@ -211,7 +211,15 @@ export class FatosServer {
 					return;
 				}
 
-				this.handleWebSocketMessage(client, raw.toString());
+				let text: string;
+				if (Array.isArray(raw)) {
+					text = Buffer.concat(raw).toString('utf8');
+				} else if (Buffer.isBuffer(raw)) {
+					text = raw.toString('utf8');
+				} else {
+					text = Buffer.from(raw).toString('utf8');
+				}
+				this.handleWebSocketMessage(client, text);
 			});
 			client.on('close', () => {
 				this.disposeClientSubscriptions(client);
@@ -689,7 +697,7 @@ export class FatosServer {
 					return;
 				}
 
-				const rows = this.db.query(spec, txRaw as number | undefined);
+				const rows = this.db.query(spec, txRaw);
 				writeJson(res, 200, { rows: serializeRows(rows) });
 				return;
 			}

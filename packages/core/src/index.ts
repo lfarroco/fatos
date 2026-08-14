@@ -782,18 +782,20 @@ function mergePullFragments(target: Record<string, unknown>, fragment: Record<st
 		}
 
 		if (Array.isArray(existing) && Array.isArray(value)) {
-			if (existing.length === value.length) {
-				for (let i = 0; i < existing.length; i += 1) {
-					const left = existing[i];
-					const right = value[i];
+			const existingValues = existing as unknown[];
+			const newValues = value as unknown[];
+			if (existingValues.length === newValues.length) {
+				for (let i = 0; i < existingValues.length; i += 1) {
+					const left = existingValues[i];
+					const right = newValues[i];
 					if (isPlainObjectValue(left) && isPlainObjectValue(right)) {
 						mergePullFragments(left, right);
 					} else {
-						existing[i] = right;
+						existingValues[i] = right;
 					}
 				}
 			} else {
-				target[key] = value;
+				target[key] = newValues;
 			}
 			continue;
 		}
@@ -1179,7 +1181,7 @@ export class FactDatabase {
 			this.transact(entries);
 		}
 
-		return Array.isArray(input) ? results : (results[0] as EntityId);
+		return Array.isArray(input) ? results : results[0];
 	}
 
 	/**
@@ -1250,7 +1252,7 @@ export class FactDatabase {
 			return null;
 		}
 
-		return [...holders][0] as EntityId;
+		return [...holders][0];
 	}
 
 	/**
@@ -2239,8 +2241,8 @@ export class FactDatabase {
 
 			for (let clauseIndex = 0; clauseIndex < where.length; clauseIndex += 1) {
 				const [entityTerm, attribute, valueTerm] = where[clauseIndex] as QueryClause;
-				const candidates = clauseCandidates[clauseIndex] as EntityId[];
-				const candidateSet = clauseCandidateSets[clauseIndex] as Set<EntityId>;
+				const candidates = clauseCandidates[clauseIndex];
+				const candidateSet = clauseCandidateSets[clauseIndex];
 
 				if (bindings.length === 0) {
 					break;
@@ -2711,7 +2713,7 @@ export class FactDatabase {
 					}
 					eids.add(target.id);
 				}
-				return Reflect.get(target, prop, receiver);
+				return Reflect.get(target, prop, receiver) as unknown;
 			}
 		});
 	}
@@ -2771,7 +2773,6 @@ export class FactDatabase {
 
 	/** Exposes a handle as the public `{ current, subscribe, dispose }` shape. */
 	private createLiveResult<T>(handle: LiveHandle<T>): LiveResult<T> {
-		const database = this;
 		return {
 			get current(): T {
 				return handle.memoValue as T;
@@ -2791,7 +2792,7 @@ export class FactDatabase {
 				}
 				handle.disposed = true;
 				handle.listeners.clear();
-				database.liveInstances.delete(handle as LiveHandle<unknown>);
+				this.liveInstances.delete(handle as LiveHandle<unknown>);
 			}
 		};
 	}
@@ -2849,7 +2850,7 @@ export class FactDatabase {
 			get current(): T {
 				return handle.memoValue as T;
 			},
-			subscribe: liveResult.subscribe,
+			subscribe: (callback: (value: T) => void): (() => void) => liveResult.subscribe(callback),
 			dispose,
 			async *[Symbol.asyncIterator](): AsyncGenerator<T> {
 				try {

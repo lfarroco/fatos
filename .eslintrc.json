@@ -29,6 +29,8 @@
 		"dist",
 		"build",
 		"*.config.js",
-		"node_modules"
+		"node_modules",
+		"**/*.test.ts",
+		"**/*.spec.ts"
 	]
 }

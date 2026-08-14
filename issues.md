@@ -208,7 +208,7 @@ Format:
 - **Task**: P0 hygiene (lint scripts exist on every workspace)
 - **Found by**: core P0 engine work, lint verification
 - **Severity**: low
-- **Status**: open
+- **Status**: fixed
 - **Description**: `.eslintrc.json` uses `parserOptions.project` pointing at each
   package's tsconfig, but every tsconfig excludes `**/*.test.ts`/`*.spec.ts`, so
   `eslint src` fails with "Parsing error ... TSConfig does not include this
@@ -216,6 +216,45 @@ Format:
   repo-wide; `npm run lint` was already broken before these changes. Fixing it
   requires either excluding test files from the lint glob or a dedicated
   tsconfig for tests (out of scope for P0 engine work).
+- **Resolution**: added `"**/*.test.ts"` and `"**/*.spec.ts"` to
+  `ignorePatterns` in root `.eslintrc.json` (test files are type-checked by
+  `tsc --noEmit`/vitest separately, so they don't need parserOptions.project
+  linting). Verified `npx eslint src` exits 0 in server, core, client, and
+  persistence.
+
+## [2026-08-14] server — lint errors in src/index.ts (unsafe argument, no-base-to-string, unnecessary assertion)
+- **Task**: repo-wide lint gate
+- **Found by**: lint verification pass
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `packages/server/src/index.ts` had three
+  `@typescript-eslint` errors: `no-unsafe-argument` in `readJsonBody` (async
+  iteration over `IncomingMessage` yields `any`), `no-base-to-string` in the
+  WS `message` handler (`RawData` union may stringify to `[object Object]`),
+  and `no-unnecessary-type-assertion` on `txRaw as number | undefined` (the
+  guard above already narrows it). No behavior change.
+- **Resolution**: typed the request-body async iteration as
+  `AsyncIterable<Buffer | string>`; decode WS `RawData` via
+  `Array.isArray`/`Buffer.isBuffer`/`Buffer.from` guards before `.toString()`;
+  dropped the redundant assertion. Server lint, typecheck, and tests green.
+
+## [2026-08-14] core — pre-existing lint errors blocking `eslint src`
+- **Task**: repo-wide lint gate
+- **Found by**: lint verification pass
+- **Severity**: low
+- **Status**: fixed
+- **Description**: once test files were excluded from linting, `packages/core`
+  surfaced 10 pre-existing type-aware errors in `src/index.ts` that kept
+  `npm run lint` non-zero (they were previously hidden among the test-file
+  parsing errors): 3× `no-unsafe-assignment` (indexing `any[]` in
+  `mergePullFragments`), 5× `no-unnecessary-type-assertion`, 1×
+  `no-unsafe-return` (`Reflect.get`), 1× `no-this-alias`, 1× `unbound-method`.
+- **Resolution**: behavior-preserving fixes — array iterations typed via
+  `unknown[]` locals, redundant `as EntityId[]`/`as Set<EntityId>`/
+  `as EntityId` assertions removed, `Reflect.get(...) as unknown`, dropped the
+  `const database = this` alias (arrow-fn `dispose` uses lexical `this`),
+  and `subscribe` wrapped in an arrow. Core lint, typecheck, and all 212
+  tests green.
 
 ## [2026-08-13] Workflow note
 
