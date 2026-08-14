@@ -20,7 +20,7 @@ Format:
 - **Task**: P0 benchmark (docs/design/04-phasing.md P0)
 - **Found by**: core P0 engine work, `npm run benchmark` (packages/core)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: 10k entities / 20k facts. ingest avg 84 ms (< 200 ms PASS),
   find by attribute value avg 8 ms (< 10 ms PASS), but single-clause query avg
   30 ms (target < 10 ms, FAIL) and 2-clause datalog join avg 80 ms
@@ -29,6 +29,34 @@ Format:
   candidate, and the datalog join re-scanning candidates per clause. Per
   04-phasing.md these are "targets to validate, not guarantees" — being routed
   back to a sub-agent for optimization.
+- **Resolution**: rewrote `query()` in core/src/index.ts to use positional
+  array bindings (no per-row `Record` spreads), per-binding EAVT index access
+  for joins (no per-clause materialization of `(eid, value)` triples plus a
+  string-keyed group map), and a non-allocating `hasAttributeValue` check for
+  constant-value clauses (replaces the `clauseTriples` scan). Removed the now
+  unused `bindTerm`/`clauseTriples`. Added fast-path tests in query.test.ts
+  (value-change exclusion, retraction-aware join, many-valued join order,
+  cross-variable join order, tx-scoped join). Measured on the P0 benchmark
+  (packages/core, 5 runs each): single-clause avg ~7.6 -> ~7.0 ms (best 6.9 ->
+  3.9 ms; amortized 3.6 ms/query), 2-clause join avg ~13.6 -> ~10.4 ms
+  (amortized 7.4 ms/query). Both targets met: single-clause < 10 ms,
+  join < 50 ms.
+
+## [2026-08-13] core — cross-variable datalog joins are narrowed to the candidate intersection (pre-existing)
+- **Task**: P0 query engine (fast-path rewrite, `npm run benchmark`)
+- **Found by**: query engine optimization work (packages/core)
+- **Severity**: low
+- **Status**: open
+- **Description**: `candidateEidsForQuery` intersects every clause's eid set,
+  and the engine iterates that intersection for any clause whose entity
+  variable is not yet bound. For a join on two *different* entity variables
+  (e.g. `[?a 'type' 'user'] [?b 'age' ?age]`) this restricts `?b` to the
+  shared intersection instead of letting it range over all entities matching
+  its own clause — narrower than textbook datalog semantics. Preserved
+  deliberately for identical observable behavior (pinned in
+  query.test.ts "joins two distinct entity variables in candidate order").
+  Fixing it (per-clause candidate sets) would change result sets/ordering and
+  is out of scope for the P0 optimization.
 
 ## [2026-08-13] repo — `npm run types` fails at root (missing scripts)
 - **Task**: P0 hygiene (docs/design/04-phasing.md P0)

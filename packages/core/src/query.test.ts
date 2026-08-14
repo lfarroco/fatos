@@ -157,4 +157,96 @@ describe('datalog query', () => {
 		db.add(['s1', 'type', 'user']);
 		expect(db.query({ find: ['?e'], where: [['?e', 'type', 'user']] })).toEqual([['s1']]);
 	});
+
+	it('excludes entities whose active value changed after an earlier match (AVET fast path verifies current value)', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user');
+		db.add(1, 'type', 'admin'); // current value is now admin
+		db.add(2, 'type', 'user');
+		db.add(3, 'type', 'admin');
+		expect(db.query({ find: ['?e'], where: [['?e', 'type', 'user']] })).toEqual([[2]]);
+	});
+
+	it('join reads active values per binding and honors retractions', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user');
+		db.add(1, 'age', 30);
+		db.retract(1, 'age', 30); // age no longer active
+		db.add(2, 'type', 'user');
+		db.add(2, 'age', 30);
+		expect(
+			db.query({
+				find: ['?e', '?a'],
+				where: [
+					['?e', 'type', 'user'],
+					['?e', 'age', '?a']
+				]
+			})
+		).toEqual([[2, 30]]);
+	});
+
+	it('join expands many-valued attributes in insertion order (per-binding EAVT path)', () => {
+		const db = createDatabase();
+		db.transact([{ ident: 'user/tags', valueType: 'string', cardinality: 'many' }]);
+		db.add(1, 'type', 'user');
+		db.add(1, 'user/tags', 'ts');
+		db.add(1, 'user/tags', 'db');
+		db.add(2, 'type', 'user');
+		db.add(2, 'user/tags', 'ts');
+		expect(
+			db.query({
+				find: ['?e', '?t'],
+				where: [
+					['?e', 'type', 'user'],
+					['?e', 'user/tags', '?t']
+				]
+			})
+		).toEqual([
+			[1, 'ts'],
+			[1, 'db'],
+			[2, 'ts']
+		]);
+	});
+
+	it('joins two distinct entity variables in candidate (first-fact) order', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user');
+		db.add(1, 'age', 30);
+		db.add(2, 'type', 'user');
+		db.add(2, 'age', 40);
+		// The engine narrows every clause to the shared candidate intersection, so
+		// ?b ranges over the same candidates as ?a (preserved from the full scan).
+		expect(
+			db.query({
+				find: ['?a', '?b', '?age'],
+				where: [
+					['?a', 'type', 'user'],
+					['?b', 'age', '?age']
+				]
+			})
+		).toEqual([
+			[1, 1, 30],
+			[1, 2, 40],
+			[2, 1, 30],
+			[2, 2, 40]
+		]);
+	});
+
+	it('supports tx-scoped joins', () => {
+		const db = createDatabase();
+		db.add(1, 'type', 'user'); // tx 1
+		db.add(1, 'age', 30); // tx 2
+		db.retract(1, 'type', 'user'); // tx 3
+		db.add(2, 'type', 'user'); // tx 4
+		db.add(2, 'age', 30); // tx 5
+		const spec = {
+			find: ['?e', '?a'],
+			where: [
+				['?e', 'type', 'user'],
+				['?e', 'age', '?a']
+			]
+		};
+		expect(db.query(spec, 2)).toEqual([[1, 30]]);
+		expect(db.query(spec)).toEqual([[2, 30]]);
+	});
 });

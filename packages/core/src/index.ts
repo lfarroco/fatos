@@ -473,80 +473,174 @@ export class FactDatabase {
 
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
 		const txLimit = normalizeTxLimit(tx);
-		let bindings: Array<Record<string, QueryTerm>> = [{}];
+		const where = spec.where;
 
-		if (spec.where.length > 0) {
-			const candidates = this.candidateEidsForQuery(spec.where, txLimit);
+		// Assign a positional column to every variable in first-appearance order.
+		// Bindings are rows (QueryTerm[]) aligned to these columns instead of
+		// Record<string, QueryTerm> objects: binding a variable is an array write
+		// and lookups are integer indexes, so no per-row object spread or property
+		// hashing happens in the join loop.
+		const columns = new Map<string, number>();
+		for (const [entityTerm, , valueTerm] of where) {
+			if (isVariable(entityTerm) && !columns.has(entityTerm)) {
+				columns.set(entityTerm, columns.size);
+			}
+
+			if (isVariable(valueTerm) && !columns.has(valueTerm)) {
+				columns.set(valueTerm, columns.size);
+			}
+		}
+
+		let bindings: QueryTerm[][] = [[]];
+
+		if (where.length > 0) {
+			const candidates = this.candidateEidsForQuery(where, txLimit);
 			const candidateSet = new Set(candidates);
 
-			for (const [entityTerm, attribute, valueTerm] of spec.where) {
+			for (const [entityTerm, attribute, valueTerm] of where) {
 				if (bindings.length === 0) {
 					break;
 				}
 
-				// A constant entity term restricts the clause to a single entity.
-				let clauseCandidates = candidates;
-				if (!isVariable(entityTerm)) {
-					const termEid = typeof entityTerm === 'number' || typeof entityTerm === 'string' ? entityTerm : null;
+				const entityVar = isVariable(entityTerm) ? entityTerm : null;
+				const valueVar = isVariable(valueTerm) ? valueTerm : null;
+				const eCol = entityVar === null ? -1 : (columns.get(entityVar) as number);
+				const vCol = valueVar === null ? -1 : (columns.get(valueVar) as number);
+				const nextBindings: QueryTerm[][] = [];
+
+				// Constant entity term: the clause either filters every binding or
+				// expands the single entity's values into the value variable.
+				if (entityVar === null) {
+					const termEid =
+						typeof entityTerm === 'number' || typeof entityTerm === 'string' ? entityTerm : null;
 					if (termEid === null || !candidateSet.has(termEid)) {
 						bindings = [];
 						break;
 					}
-					clauseCandidates = [termEid];
-				}
 
-				const triples = this.clauseTriples(
-					clauseCandidates,
-					attribute,
-					txLimit,
-					isVariable(valueTerm) ? undefined : valueTerm
-				);
+					if (valueVar === null) {
+						if (this.hasAttributeValue(termEid, attribute, valueTerm, txLimit)) {
+							for (const binding of bindings) {
+								nextBindings.push(binding);
+							}
+						}
+					} else {
+						for (const binding of bindings) {
+							for (const item of this.attributeValues(termEid, attribute, txLimit)) {
+								if (!isQueryTerm(item)) {
+									continue;
+								}
 
-				const entityVar = isVariable(entityTerm) ? entityTerm : null;
-				const valueVar = isVariable(valueTerm) ? valueTerm : null;
-				const sample = bindings[0];
-				const keyEntity = entityVar !== null && entityVar in sample;
-				const keyValue = valueVar !== null && valueVar in sample;
-
-				// Group clause triples by the already-bound term so each binding does a
-				// constant-time lookup instead of re-scanning every triple (order is
-				// preserved: groups retain the candidate-order the full scan would use).
-				let indexed: Map<string, Array<[EntityId, QueryTerm]>> | null = null;
-				if (keyEntity || keyValue) {
-					indexed = new Map();
-					for (const triple of triples) {
-						const key = keyEntity ? String(triple[0]) : String(triple[1]);
-						const list = indexed.get(key);
-						if (list) {
-							list.push(triple);
-						} else {
-							indexed.set(key, [triple]);
+								const extended = this.extendBinding(binding, vCol, item);
+								if (extended !== null) {
+									nextBindings.push(extended);
+								}
+							}
 						}
 					}
+
+					bindings = nextBindings;
+					continue;
 				}
 
-				const nextBindings: Array<Record<string, QueryTerm>> = [];
-				for (const binding of bindings) {
-					let list: Array<[EntityId, QueryTerm]> = triples;
-					if (indexed !== null) {
-						const key = keyEntity
-							? String(binding[entityTerm as string])
-							: String(binding[valueTerm as string]);
-						list = indexed.get(key) ?? [];
+				// Entity variable already bound: consult the EAVT index directly per
+				// binding instead of materializing (eid, value) triples for every
+				// candidate and grouping them. This is the hot path for joins and is
+				// O(bindings × values-per-entity) rather than O(candidates) per clause.
+				if (bindings[0][eCol] !== undefined) {
+					if (valueVar === null) {
+						for (const binding of bindings) {
+							if (this.hasAttributeValue(binding[eCol] as EntityId, attribute, valueTerm, txLimit)) {
+								nextBindings.push(binding);
+							}
+						}
+					} else if (vCol === eCol) {
+						for (const binding of bindings) {
+							for (const item of this.attributeValues(binding[eCol] as EntityId, attribute, txLimit)) {
+								if (!isQueryTerm(item)) {
+									continue;
+								}
+
+								if (Object.is(binding[eCol], item)) {
+									nextBindings.push(binding);
+								}
+							}
+						}
+					} else if (bindings[0][vCol] !== undefined) {
+						for (const binding of bindings) {
+							if (this.hasAttributeValue(binding[eCol] as EntityId, attribute, binding[vCol] as QueryTerm, txLimit)) {
+								nextBindings.push(binding);
+							}
+						}
+					} else {
+						for (const binding of bindings) {
+							for (const item of this.attributeValues(binding[eCol] as EntityId, attribute, txLimit)) {
+								if (!isQueryTerm(item)) {
+									continue;
+								}
+
+								const extended = this.extendBinding(binding, vCol, item);
+								if (extended !== null) {
+									nextBindings.push(extended);
+								}
+							}
+						}
 					}
 
-					for (const [eid, value] of list) {
-						const withEntity = this.bindTerm(binding, entityTerm, eid);
-						if (!withEntity) {
-							continue;
-						}
+					bindings = nextBindings;
+					continue;
+				}
 
-						const withValue = this.bindTerm(withEntity, valueTerm, value);
-						if (!withValue) {
-							continue;
+				// Entity variable unbound: iterate the ordered candidate list (global
+				// first-fact order) and expand/verify each candidate's values. This
+				// preserves the full-scan row ordering exactly.
+				if (valueVar === null) {
+					for (const binding of bindings) {
+						for (const eid of candidates) {
+							if (this.hasAttributeValue(eid, attribute, valueTerm, txLimit)) {
+								const extended = this.extendBinding(binding, eCol, eid);
+								if (extended !== null) {
+									nextBindings.push(extended);
+								}
+							}
 						}
+					}
+				} else if (vCol === eCol) {
+					for (const binding of bindings) {
+						for (const eid of candidates) {
+							for (const item of this.attributeValues(eid, attribute, txLimit)) {
+								if (!isQueryTerm(item)) {
+									continue;
+								}
 
-						nextBindings.push(withValue);
+								if (Object.is(eid, item)) {
+									const extended = this.extendBinding(binding, eCol, eid);
+									if (extended !== null) {
+										nextBindings.push(extended);
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for (const binding of bindings) {
+						for (const eid of candidates) {
+							for (const item of this.attributeValues(eid, attribute, txLimit)) {
+								if (!isQueryTerm(item)) {
+									continue;
+								}
+
+								const extended = this.extendBinding(binding, eCol, eid);
+								if (extended === null) {
+									continue;
+								}
+
+								const withValue = this.extendBinding(extended, vCol, item);
+								if (withValue !== null) {
+									nextBindings.push(withValue);
+								}
+							}
+						}
 					}
 				}
 
@@ -557,9 +651,14 @@ export class FactDatabase {
 		const seen = new Set<string>();
 		const rows: QueryTerm[][] = [];
 		for (const binding of bindings) {
-			const row = spec.find.map((term) =>
-				isVariable(term) ? (binding[term] ?? null) : (term as QueryTerm)
-			);
+			const row = spec.find.map((term) => {
+				if (!isVariable(term)) {
+					return term as QueryTerm;
+				}
+
+				const col = columns.get(term);
+				return col === undefined ? null : (binding[col] ?? null);
+			});
 
 			const key = rowKey(row);
 			if (seen.has(key)) {
@@ -573,23 +672,67 @@ export class FactDatabase {
 		return rows;
 	}
 
-	private bindTerm(
-		binding: Record<string, QueryTerm>,
-		term: QueryTerm,
-		actualValue: QueryTerm
-	): Record<string, QueryTerm> | null {
-		if (!isVariable(term)) {
-			return Object.is(term, actualValue) ? binding : null;
+	/**
+	 * Extends a positional binding row with `value` at `col`, returning null when
+	 * the column is already bound to a different value (mirrors the old
+	 * bindTerm consistency check without allocating an object per bind).
+	 */
+	private extendBinding(binding: QueryTerm[], col: number, value: QueryTerm): QueryTerm[] | null {
+		const existing = binding[col];
+		if (existing !== undefined && !Object.is(existing, value)) {
+			return null;
 		}
 
-		if (!(term in binding)) {
-			return {
-				...binding,
-				[term]: actualValue
-			};
+		const extended = binding.slice();
+		extended[col] = value;
+		return extended;
+	}
+
+	/**
+	 * True when the entity's active value(s) for `attribute` as of `txLimit`
+	 * include `value` (Object.is semantics, cardinality-many included). Mirrors
+	 * attributeValues + clauseTriples' constant filter without allocating.
+	 */
+	private hasAttributeValue(eid: EntityId, attribute: string, value: QueryTerm, txLimit: number): boolean {
+		const facts = this.eavt.get(eid)?.get(attribute);
+		if (!facts) {
+			return false;
 		}
 
-		return Object.is(binding[term], actualValue) ? binding : null;
+		const schema = this.attributeSchemas.get(attribute);
+		if (schema?.cardinality === 'many') {
+			let present = false;
+			for (const [, , factValue, factTx, op] of facts) {
+				if (factTx > txLimit) {
+					continue;
+				}
+
+				if (op === 'add') {
+					if (Object.is(factValue, value)) {
+						present = true;
+					}
+				} else if (Object.is(factValue, value)) {
+					present = false;
+				}
+			}
+
+			return present;
+		}
+
+		let current: unknown;
+		for (const [, , factValue, factTx, op] of facts) {
+			if (factTx > txLimit) {
+				continue;
+			}
+
+			if (op === 'add') {
+				current = factValue;
+			} else if (current !== undefined && Object.is(current, factValue)) {
+				current = undefined;
+			}
+		}
+
+		return isQueryTerm(current) && Object.is(current, value);
 	}
 
 	/**
@@ -684,37 +827,6 @@ export class FactDatabase {
 		}
 
 		return current === undefined ? [] : [current];
-	}
-
-	/**
-	 * Expands the candidate entities' value(s) for one clause attribute into
-	 * (eid, value) triples, in the same order a full entity-state scan would
-	 * produce: candidates in global first-fact order, many-valued attributes in
-	 * insertion order. When `constantValue` is provided (a non-variable value
-	 * term) only matching triples are emitted.
-	 */
-	private clauseTriples(
-		candidates: EntityId[],
-		attribute: string,
-		txLimit: number,
-		constantValue?: QueryTerm
-	): Array<[EntityId, QueryTerm]> {
-		const triples: Array<[EntityId, QueryTerm]> = [];
-		for (const eid of candidates) {
-			for (const item of this.attributeValues(eid, attribute, txLimit)) {
-				if (!isQueryTerm(item)) {
-					continue;
-				}
-
-				if (constantValue !== undefined && !Object.is(constantValue, item)) {
-					continue;
-				}
-
-				triples.push([eid, item]);
-			}
-		}
-
-		return triples;
 	}
 
 	private schemaDeclarationToFacts(schema: SchemaDeclaration): Mutation[] {
