@@ -19,7 +19,8 @@
 		"dev": "tsup src/index.ts --format esm --dts --sourcemap --watch",
 		"test": "vitest",
 		"lint": "eslint src",
-		"types": "tsc --noEmit"
+		"types": "tsc --noEmit",
+		"benchmark": "vite-node benchmarks/benchmark.ts"
 	},
 	"keywords": [
 		"database",

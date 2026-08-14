@@ -18,7 +18,9 @@
 		"example:react": "vite-node src/cli.ts react",
 		"example:schema-designer": "vite-node src/cli.ts schema-designer",
 		"example:full-stack": "vite-node src/cli.ts full-stack",
-		"test": "vitest"
+		"test": "vitest",
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
 	},
 	"keywords": [
 		"examples",

@@ -101,6 +101,50 @@ function isVariable(term: QueryTerm): term is string {
 	return typeof term === 'string' && term.startsWith('?');
 }
 
+function isQueryTerm(value: unknown): value is QueryTerm {
+	return (
+		typeof value === 'string' ||
+		typeof value === 'number' ||
+		typeof value === 'boolean' ||
+		value === null
+	);
+}
+
+/**
+ * Fast dedup key for a result row. Rows only ever contain QueryTerms (strings,
+ * numbers, booleans, null), so this mirrors JSON.stringify's keying for those
+ * values — including its collisions (NaN and Infinity -> "null", -0 -> "0",
+ * quoted/escaped strings) — without the array/object machinery.
+ */
+function rowKey(row: QueryTerm[]): string {
+	let key = '[';
+	for (let i = 0; i < row.length; i += 1) {
+		if (i > 0) {
+			key += ',';
+		}
+
+		const value = row[i];
+		if (value === null) {
+			key += 'null';
+			continue;
+		}
+
+		if (typeof value === 'string') {
+			key += JSON.stringify(value);
+			continue;
+		}
+
+		if (typeof value === 'number') {
+			key += Number.isFinite(value) ? (Object.is(value, -0) ? '0' : String(value)) : 'null';
+			continue;
+		}
+
+		key += value ? 'true' : 'false';
+	}
+
+	return `${key}]`;
+}
+
 function isSchemaDeclaration(entry: TransactionEntryInput): entry is SchemaDeclaration {
 	return !Array.isArray(entry);
 }
@@ -296,36 +340,43 @@ export class FactDatabase {
 
 	entity(eid: EntityId, tx?: number): EntityState | null {
 		const txLimit = normalizeTxLimit(tx);
-		const state = new Map<string, unknown | Set<unknown>>();
+		const entityAttributes = this.eavt.get(eid);
+		if (!entityAttributes) {
+			return null;
+		}
 
-		for (const [factEid, attribute, value, factTx, op] of this.facts) {
-			if (factEid !== eid || factTx > txLimit) {
-				continue;
-			}
+		const state = new Map<string, unknown>();
 
-			const schema = this.attributeSchemas.get(attribute);
-			if (schema?.cardinality === 'many') {
-				const current = state.get(attribute);
-				const values = current instanceof Set ? current : new Set<unknown>();
+		for (const [attribute, facts] of entityAttributes) {
+			for (const [, , value, factTx, op] of facts) {
+				if (factTx > txLimit) {
+					continue;
+				}
+
+				const schema = this.attributeSchemas.get(attribute);
+				if (schema?.cardinality === 'many') {
+					const current = state.get(attribute);
+					const values = current instanceof Set ? current : new Set<unknown>();
+
+					if (op === 'add') {
+						values.add(value);
+					} else {
+						values.delete(value);
+					}
+
+					if (values.size === 0) {
+						state.delete(attribute);
+					} else {
+						state.set(attribute, values);
+					}
+					continue;
+				}
 
 				if (op === 'add') {
-					values.add(value);
-				} else {
-					values.delete(value);
-				}
-
-				if (values.size === 0) {
+					state.set(attribute, value);
+				} else if (Object.is(state.get(attribute), value)) {
 					state.delete(attribute);
-				} else {
-					state.set(attribute, values);
 				}
-				continue;
-			}
-
-			if (op === 'add') {
-				state.set(attribute, value);
-			} else if (Object.is(state.get(attribute), value)) {
-				state.delete(attribute);
 			}
 		}
 
@@ -335,29 +386,17 @@ export class FactDatabase {
 
 		const entity: EntityState = { id: eid };
 		for (const [attribute, value] of state) {
-			if (value instanceof Set) {
-				entity[attribute] = Array.from(value);
-				continue;
-			}
-
-			entity[attribute] = value;
+			entity[attribute] = value instanceof Set ? Object.freeze(Array.from(value)) : value;
 		}
 
-		return entity;
+		return Object.freeze(entity);
 	}
 
 	find(criteria: Record<string, unknown>, tx?: number): EntityState[] {
 		const txLimit = normalizeTxLimit(tx);
-		const eids = new Set<EntityId>();
-
-		for (const [eid, , , factTx] of this.facts) {
-			if (factTx <= txLimit) {
-				eids.add(eid);
-			}
-		}
-
 		const matches: EntityState[] = [];
-		for (const eid of eids) {
+
+		for (const eid of this.candidateEidsForCriteria(criteria, txLimit)) {
 			const entity = this.entity(eid, txLimit);
 			if (!entity) {
 				continue;
@@ -372,53 +411,162 @@ export class FactDatabase {
 		return matches;
 	}
 
-	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
-		const triples = this.materializedTriples(tx);
-		let bindings: Array<Record<string, QueryTerm>> = [{}];
+	/**
+	 * Returns candidate entity ids (in global first-fact order) that could match the
+	 * criteria, narrowed through the AVET/AEVT indexes. Correctness still comes from
+	 * the full entity check in `find`; this only avoids scanning every fact.
+	 */
+	private candidateEidsForCriteria(criteria: Record<string, unknown>, txLimit: number): EntityId[] {
+		const entries = Object.entries(criteria);
+		if (entries.length === 0) {
+			return [...this.eavt.keys()];
+		}
 
-		for (const [entityTerm, attribute, valueTerm] of spec.where) {
-			const nextBindings: Array<Record<string, QueryTerm>> = [];
+		const sets: Array<Set<EntityId>> = [];
+		for (const [key, value] of entries) {
+			const eids = new Set<EntityId>();
 
-			for (const binding of bindings) {
-				for (const [eid, factAttribute, value] of triples) {
-					if (factAttribute !== attribute) {
-						continue;
-					}
-
-					const withEntity = this.bindTerm(binding, entityTerm, eid);
-					if (!withEntity) {
-						continue;
-					}
-
-					const withValue = this.bindTerm(withEntity, valueTerm, value);
-					if (!withValue) {
-						continue;
-					}
-
-					nextBindings.push(withValue);
+			if (key === 'id') {
+				if (typeof value === 'number' || typeof value === 'string') {
+					eids.add(value);
 				}
+				sets.push(eids);
+				continue;
 			}
 
-			bindings = nextBindings;
+			if (isQueryTerm(value)) {
+				const valueFacts = this.avet.get(key)?.get(valueKey(value));
+				if (valueFacts) {
+					for (const fact of valueFacts) {
+						if (fact[3] <= txLimit) {
+							eids.add(fact[0]);
+						}
+					}
+				}
+				sets.push(eids);
+				continue;
+			}
+
+			const attributeEntities = this.aevt.get(key);
+			if (attributeEntities) {
+				for (const [eid, facts] of attributeEntities) {
+					for (const fact of facts) {
+						if (fact[3] <= txLimit) {
+							eids.add(eid);
+							break;
+						}
+					}
+				}
+			}
+			sets.push(eids);
+		}
+
+		const ordered: EntityId[] = [];
+		for (const eid of this.eavt.keys()) {
+			if (sets.every((set) => set.has(eid))) {
+				ordered.push(eid);
+			}
+		}
+
+		return ordered;
+	}
+
+	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
+		const txLimit = normalizeTxLimit(tx);
+		let bindings: Array<Record<string, QueryTerm>> = [{}];
+
+		if (spec.where.length > 0) {
+			const candidates = this.candidateEidsForQuery(spec.where, txLimit);
+			const candidateSet = new Set(candidates);
+
+			for (const [entityTerm, attribute, valueTerm] of spec.where) {
+				if (bindings.length === 0) {
+					break;
+				}
+
+				// A constant entity term restricts the clause to a single entity.
+				let clauseCandidates = candidates;
+				if (!isVariable(entityTerm)) {
+					const termEid = typeof entityTerm === 'number' || typeof entityTerm === 'string' ? entityTerm : null;
+					if (termEid === null || !candidateSet.has(termEid)) {
+						bindings = [];
+						break;
+					}
+					clauseCandidates = [termEid];
+				}
+
+				const triples = this.clauseTriples(
+					clauseCandidates,
+					attribute,
+					txLimit,
+					isVariable(valueTerm) ? undefined : valueTerm
+				);
+
+				const entityVar = isVariable(entityTerm) ? entityTerm : null;
+				const valueVar = isVariable(valueTerm) ? valueTerm : null;
+				const sample = bindings[0];
+				const keyEntity = entityVar !== null && entityVar in sample;
+				const keyValue = valueVar !== null && valueVar in sample;
+
+				// Group clause triples by the already-bound term so each binding does a
+				// constant-time lookup instead of re-scanning every triple (order is
+				// preserved: groups retain the candidate-order the full scan would use).
+				let indexed: Map<string, Array<[EntityId, QueryTerm]>> | null = null;
+				if (keyEntity || keyValue) {
+					indexed = new Map();
+					for (const triple of triples) {
+						const key = keyEntity ? String(triple[0]) : String(triple[1]);
+						const list = indexed.get(key);
+						if (list) {
+							list.push(triple);
+						} else {
+							indexed.set(key, [triple]);
+						}
+					}
+				}
+
+				const nextBindings: Array<Record<string, QueryTerm>> = [];
+				for (const binding of bindings) {
+					let list: Array<[EntityId, QueryTerm]> = triples;
+					if (indexed !== null) {
+						const key = keyEntity
+							? String(binding[entityTerm as string])
+							: String(binding[valueTerm as string]);
+						list = indexed.get(key) ?? [];
+					}
+
+					for (const [eid, value] of list) {
+						const withEntity = this.bindTerm(binding, entityTerm, eid);
+						if (!withEntity) {
+							continue;
+						}
+
+						const withValue = this.bindTerm(withEntity, valueTerm, value);
+						if (!withValue) {
+							continue;
+						}
+
+						nextBindings.push(withValue);
+					}
+				}
+
+				bindings = nextBindings;
+			}
 		}
 
 		const seen = new Set<string>();
 		const rows: QueryTerm[][] = [];
 		for (const binding of bindings) {
-			const row = spec.find.map((term) => {
-				if (isVariable(term as QueryTerm)) {
-					return binding[term] ?? null;
-				}
+			const row = spec.find.map((term) =>
+				isVariable(term) ? (binding[term] ?? null) : (term as QueryTerm)
+			);
 
-				return term as QueryTerm;
-			});
-
-			const rowKey = JSON.stringify(row);
-			if (seen.has(rowKey)) {
+			const key = rowKey(row);
+			if (seen.has(key)) {
 				continue;
 			}
 
-			seen.add(rowKey);
+			seen.add(key);
 			rows.push(row);
 		}
 
@@ -444,40 +592,125 @@ export class FactDatabase {
 		return Object.is(binding[term], actualValue) ? binding : null;
 	}
 
-	private materializedTriples(tx?: number): Array<[EntityId, string, QueryTerm]> {
-		const txLimit = normalizeTxLimit(tx);
-		const eids = new Set<EntityId>();
+	/**
+	 * Returns entity ids (in global first-fact order) that satisfy every clause's
+	 * attribute/value constraint, narrowed via the AVET/AEVT indexes instead of
+	 * scanning every fact. Any entity that can contribute to a result row is a
+	 * member of every per-clause set, so restricting to this intersection never
+	 * drops a result (and preserves the full-scan row ordering).
+	 */
+	private candidateEidsForQuery(where: QueryClause[], txLimit: number): EntityId[] {
+		const sets: Array<Set<EntityId>> = [];
+		for (const [, attribute, valueTerm] of where) {
+			const eids = new Set<EntityId>();
 
-		for (const [eid, , , factTx] of this.facts) {
-			if (factTx <= txLimit) {
-				eids.add(eid);
-			}
-		}
-
-		const triples: Array<[EntityId, string, QueryTerm]> = [];
-		for (const eid of eids) {
-			const entity = this.entity(eid, txLimit);
-			if (!entity) {
+			if (!isVariable(valueTerm)) {
+				const valueFacts = this.avet.get(attribute)?.get(valueKey(valueTerm));
+				if (valueFacts) {
+					for (const fact of valueFacts) {
+						if (fact[3] <= txLimit) {
+							eids.add(fact[0]);
+						}
+					}
+				}
+				sets.push(eids);
 				continue;
 			}
 
-			for (const [attribute, value] of Object.entries(entity)) {
-				if (attribute === 'id') {
-					continue;
-				}
-
-				if (Array.isArray(value)) {
-					for (const item of value) {
-						if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean' || item === null) {
-							triples.push([eid, attribute, item]);
+			const attributeEntities = this.aevt.get(attribute);
+			if (attributeEntities) {
+				for (const [eid, facts] of attributeEntities) {
+					for (const fact of facts) {
+						if (fact[3] <= txLimit) {
+							eids.add(eid);
+							break;
 						}
 					}
+				}
+			}
+			sets.push(eids);
+		}
+
+		const ordered: EntityId[] = [];
+		for (const eid of this.eavt.keys()) {
+			if (sets.every((set) => set.has(eid))) {
+				ordered.push(eid);
+			}
+		}
+
+		return ordered;
+	}
+
+	/**
+	 * Extracts the active value(s) of one attribute for an entity as of a
+	 * transaction limit, straight from the EAVT index. Mirrors the entity-state
+	 * reconstruction for a single attribute: cardinality-many returns the values
+	 * in insertion order (re-adds move to the end), anything else is last-wins.
+	 */
+	private attributeValues(eid: EntityId, attribute: string, txLimit: number): unknown[] {
+		const facts = this.eavt.get(eid)?.get(attribute);
+		if (!facts) {
+			return [];
+		}
+
+		const schema = this.attributeSchemas.get(attribute);
+		if (schema?.cardinality === 'many') {
+			const values = new Set<unknown>();
+			for (const [, , value, factTx, op] of facts) {
+				if (factTx > txLimit) {
 					continue;
 				}
 
-				if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
-					triples.push([eid, attribute, value]);
+				if (op === 'add') {
+					values.add(value);
+				} else {
+					values.delete(value);
 				}
+			}
+			return Array.from(values);
+		}
+
+		let current: unknown;
+		for (const [, , value, factTx, op] of facts) {
+			if (factTx > txLimit) {
+				continue;
+			}
+
+			if (op === 'add') {
+				current = value;
+			} else if (current !== undefined && Object.is(current, value)) {
+				current = undefined;
+			}
+		}
+
+		return current === undefined ? [] : [current];
+	}
+
+	/**
+	 * Expands the candidate entities' value(s) for one clause attribute into
+	 * (eid, value) triples, in the same order a full entity-state scan would
+	 * produce: candidates in global first-fact order, many-valued attributes in
+	 * insertion order. When `constantValue` is provided (a non-variable value
+	 * term) only matching triples are emitted.
+	 */
+	private clauseTriples(
+		candidates: EntityId[],
+		attribute: string,
+		txLimit: number,
+		constantValue?: QueryTerm
+	): Array<[EntityId, QueryTerm]> {
+		const triples: Array<[EntityId, QueryTerm]> = [];
+		for (const eid of candidates) {
+			for (const item of this.attributeValues(eid, attribute, txLimit)) {
+				if (!isQueryTerm(item)) {
+					continue;
+				}
+
+				if (constantValue !== undefined && !Object.is(constantValue, item)) {
+					continue;
+				}
+
+				triples.push([eid, item]);
 			}
 		}
 
@@ -580,14 +813,15 @@ export class FactDatabase {
 	}
 
 	private activeValues(eid: EntityId, attribute: string): unknown[] {
+		const facts = this.eavt.get(eid)?.get(attribute);
+		if (!facts) {
+			return [];
+		}
+
 		const schema = this.attributeSchemas.get(attribute);
 		if (schema?.cardinality === 'many') {
 			const values = new Set<unknown>();
-			for (const [factEid, factAttr, value, , op] of this.facts) {
-				if (factEid !== eid || factAttr !== attribute) {
-					continue;
-				}
-
+			for (const [, , value, , op] of facts) {
 				if (op === 'add') {
 					values.add(value);
 				} else {
@@ -597,12 +831,8 @@ export class FactDatabase {
 			return Array.from(values);
 		}
 
-		let current: unknown | undefined;
-		for (const [factEid, factAttr, value, , op] of this.facts) {
-			if (factEid !== eid || factAttr !== attribute) {
-				continue;
-			}
-
+		let current: unknown;
+		for (const [, , value, , op] of facts) {
 			if (op === 'add') {
 				current = value;
 			} else if (current !== undefined && Object.is(current, value)) {

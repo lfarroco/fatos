@@ -8,7 +8,8 @@
 		"build": "tsup src/background.ts src/panel.ts src/panel-ui.ts src/content.ts --format iife --dts --sourcemap --splitting=false --public-dir src",
 		"dev": "tsup src/background.ts src/panel.ts src/panel-ui.ts src/content.ts --format iife --dts --sourcemap --splitting=false --public-dir src --watch",
 		"test": "vitest",
-		"lint": "eslint src"
+		"lint": "eslint src",
+		"types": "tsc --noEmit"
 	},
 	"keywords": [
 		"chrome-extension",
