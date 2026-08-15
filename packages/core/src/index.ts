@@ -192,9 +192,15 @@ export type LiveQueryOptions = {
 	signal?: AbortSignal;
 };
 
-type EAVTIndex = Map<EntityId, Map<string, Fact[]>>;
-type AEVTIndex = Map<string, Map<EntityId, Fact[]>>;
-type AVETIndex = Map<string, Map<string, Fact[]>>;
+/**
+ * Interned index shapes (design/05): EAVT/AEVT/AVET are keyed by internal numeric
+ * attribute ids instead of ident strings, so hot lookups hash SMIs and each distinct
+ * attribute ident is stored once. Entity keys stay user-facing `EntityId`s (numbers or
+ * canonicalized strings); only the attribute level is interned in Phase 1.
+ */
+type EAVTIndex = Map<EntityId, Map<number, Fact[]>>;
+type AEVTIndex = Map<number, Map<EntityId, Fact[]>>;
+type AVETIndex = Map<number, Map<string, Fact[]>>;
 
 function normalizeTxLimit(tx?: number): number {
 	return tx ?? Number.POSITIVE_INFINITY;
@@ -940,8 +946,10 @@ function matchesValueType(value: unknown, valueType: ValueType): boolean {
  * entities each attribute was actually read on.
  */
 type AccessTracker = {
-	attributes: Set<string>;
-	eidsByAttribute: Map<string, Set<EntityId>>;
+	/** Internal attribute ids touched while the selector ran (design/05). */
+	attributes: Set<number>;
+	/** Internal attribute id -> entities the attribute was actually read on. */
+	eidsByAttribute: Map<number, Set<EntityId>>;
 };
 
 /**
@@ -951,9 +959,9 @@ type AccessTracker = {
 type LiveHandle<T> = {
 	read: () => T;
 	trackReads: boolean;
-	explicitDeps: ReadonlySet<string> | null;
-	/** attribute -> candidate eids (AEVT members at last evaluation + tracked reads). */
-	dependencies: Map<string, Set<EntityId>>;
+	explicitDeps: ReadonlySet<number> | null;
+	/** internal attribute id -> candidate eids (AEVT members at last evaluation + tracked reads). */
+	dependencies: Map<number, Set<EntityId>>;
 	/** No attributes were recorded — every write is potentially relevant. */
 	fallbackAll: boolean;
 	listeners: Set<(value: T) => void>;
@@ -1025,12 +1033,54 @@ export class FactDatabase {
 	private nextEntityEid = 1;
 	private attributeSchemas = new Map<string, AttributeSchema>();
 	private schemaByIdent = new Map<string, number>();
-	/** attribute -> valueKey -> holder entity ids, maintained at commit (design/04 unique-index optimization). */
-	private uniqueIndex = new Map<string, Map<string, Set<EntityId>>>();
+	/** attribute id -> valueKey -> holder entity ids, maintained at commit (design/04 unique-index optimization). */
+	private uniqueIndex = new Map<number, Map<string, Set<EntityId>>>();
+	/**
+	 * Internal symbol table (design/05): every distinct attribute ident is assigned a
+	 * small numeric id used as the key in EAVT/AEVT/AVET, uniqueIndex, and the live
+	 * dependency maps. The id space is internal-only — ids are never exposed, and id
+	 * assignment order has no observable effect (index entry order comes from first-write
+	 * order, never from interner order). `attributeIds`'s map keys double as the
+	 * canonical ident instances.
+	 */
+	private attributeIds = new Map<string, number>();
+	private attributeIdents = new Map<number, string>();
+	private nextAttributeId = 1;
+	/** Content -> canonical instance for string entity ids (dedups equal strings). */
+	private canonicalStrings = new Map<string, string>();
 	/** Active access tracker while a `live(fn)` selector runs; null outside live evaluation. */
 	private tracking: AccessTracker | null = null;
 	/** Every live/liveQuery instance, consulted once per committed transaction. */
 	private liveInstances = new Set<LiveHandle<unknown>>();
+
+	/** Allocates (or returns) the internal id for an attribute ident. */
+	private internAttribute(ident: string): number {
+		const existing = this.attributeIds.get(ident);
+		if (existing !== undefined) {
+			return existing;
+		}
+
+		const id = this.nextAttributeId++;
+		this.attributeIds.set(ident, id);
+		this.attributeIdents.set(id, ident);
+		return id;
+	}
+
+	/** Canonical instance for a string, deduping equal content however it arrives. */
+	private canonicalString(value: string): string {
+		const existing = this.canonicalStrings.get(value);
+		if (existing !== undefined) {
+			return existing;
+		}
+
+		this.canonicalStrings.set(value, value);
+		return value;
+	}
+
+	/** Canonical user-facing eid: numbers pass through, strings are deduped. */
+	private canonicalEid(eid: EntityId): EntityId {
+		return typeof eid === 'string' ? this.canonicalString(eid) : eid;
+	}
 
 	private commitTransaction(metadata?: Record<string, unknown>): TransactionRecord {
 		const tx = this.nextTx++;
@@ -1041,29 +1091,34 @@ export class FactDatabase {
 	}
 
 	private appendFact(tx: number, op: FactOperation, eid: EntityId, attribute: string, value: unknown): Fact {
-		const fact: Fact = [eid, attribute, value, tx, op];
+		// Canonicalize the user-facing eid/attribute so equal content shares one string
+		// instance, and intern the attribute to a numeric key for the indexes.
+		const canonEid = this.canonicalEid(eid);
+		const attrId = this.internAttribute(attribute);
+		const canonAttribute = this.attributeIdents.get(attrId) as string;
+		const fact: Fact = [canonEid, canonAttribute, value, tx, op];
 		this.facts.push(fact);
 
-		const entityAttributes = this.eavt.get(eid) ?? new Map<string, Fact[]>();
-		const eavtFacts = entityAttributes.get(attribute) ?? [];
+		const entityAttributes = this.eavt.get(canonEid) ?? new Map<number, Fact[]>();
+		const eavtFacts = entityAttributes.get(attrId) ?? [];
 		eavtFacts.push(fact);
-		entityAttributes.set(attribute, eavtFacts);
-		this.eavt.set(eid, entityAttributes);
+		entityAttributes.set(attrId, eavtFacts);
+		this.eavt.set(canonEid, entityAttributes);
 
-		const attributeEntities = this.aevt.get(attribute) ?? new Map<EntityId, Fact[]>();
-		const aevtFacts = attributeEntities.get(eid) ?? [];
+		const attributeEntities = this.aevt.get(attrId) ?? new Map<EntityId, Fact[]>();
+		const aevtFacts = attributeEntities.get(canonEid) ?? [];
 		aevtFacts.push(fact);
-		attributeEntities.set(eid, aevtFacts);
-		this.aevt.set(attribute, attributeEntities);
+		attributeEntities.set(canonEid, aevtFacts);
+		this.aevt.set(attrId, attributeEntities);
 
-		const attributeValues = this.avet.get(attribute) ?? new Map<string, Fact[]>();
+		const attributeValues = this.avet.get(attrId) ?? new Map<string, Fact[]>();
 		const avetKey = valueKey(value);
 		const avetFacts = attributeValues.get(avetKey) ?? [];
 		avetFacts.push(fact);
 		attributeValues.set(avetKey, avetFacts);
-		this.avet.set(attribute, attributeValues);
+		this.avet.set(attrId, attributeValues);
 
-		this.maintainUniqueIndex(attribute, value, eid, op);
+		this.maintainUniqueIndex(canonAttribute, attrId, value, canonEid, op);
 
 		return fact;
 	}
@@ -1074,16 +1129,16 @@ export class FactDatabase {
 	 * unique constraint exists (schema is data — constraints can be added to
 	 * attributes with pre-existing facts), then updated in place.
 	 */
-	private maintainUniqueIndex(attribute: string, value: unknown, eid: EntityId, op: FactOperation): void {
+	private maintainUniqueIndex(attribute: string, attrId: number, value: unknown, eid: EntityId, op: FactOperation): void {
 		const schema = this.attributeSchemas.get(attribute);
 		if (schema?.unique !== 'identity' && schema?.unique !== 'value') {
 			return;
 		}
 
-		let holders = this.uniqueIndex.get(attribute);
+		let holders = this.uniqueIndex.get(attrId);
 		if (!holders) {
-			holders = this.scanUniqueHolders(attribute);
-			this.uniqueIndex.set(attribute, holders);
+			holders = this.scanUniqueHolders(attrId);
+			this.uniqueIndex.set(attrId, holders);
 		}
 
 		const key = valueKey(value);
@@ -1102,13 +1157,14 @@ export class FactDatabase {
 	}
 
 	/** Builds the full (attribute, value) -> holder map from the AEVT index. */
-	private scanUniqueHolders(attribute: string): Map<string, Set<EntityId>> {
+	private scanUniqueHolders(attrId: number): Map<string, Set<EntityId>> {
 		const holders = new Map<string, Set<EntityId>>();
-		const attributeEntities = this.aevt.get(attribute);
+		const attributeEntities = this.aevt.get(attrId);
 		if (!attributeEntities) {
 			return holders;
 		}
 
+		const attribute = this.attributeIdents.get(attrId) as string;
 		for (const [eid] of attributeEntities) {
 			for (const value of this.attributeValues(eid, attribute, Number.POSITIVE_INFINITY)) {
 				const valueKeyString = valueKey(value);
@@ -1554,7 +1610,8 @@ export class FactDatabase {
 		// when the entity was not a candidate at the last evaluation.
 		const newPairs = new Set<string>();
 		for (const [, eid, attribute] of mutations) {
-			if (!this.aevt.get(attribute)?.has(eid)) {
+			const attrId = this.attributeIds.get(attribute);
+			if (attrId === undefined || !this.aevt.get(attrId)?.has(eid)) {
 				newPairs.add(livePairKey(eid, attribute));
 			}
 		}
@@ -1646,7 +1703,8 @@ export class FactDatabase {
 	}
 
 	getFactsByAttribute(attribute: string): readonly Fact[] {
-		const attributeEntities = this.aevt.get(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		const attributeEntities = attrId === undefined ? undefined : this.aevt.get(attrId);
 		if (!attributeEntities) {
 			return [];
 		}
@@ -1660,11 +1718,21 @@ export class FactDatabase {
 	}
 
 	getFactsByEntityAttribute(eid: EntityId, attribute: string): readonly Fact[] {
-		return this.eavt.get(eid)?.get(attribute)?.slice() ?? [];
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return [];
+		}
+
+		return this.eavt.get(eid)?.get(attrId)?.slice() ?? [];
 	}
 
 	getFactsByAttributeValue(attribute: string, value: unknown): readonly Fact[] {
-		return this.avet.get(attribute)?.get(valueKey(value))?.slice() ?? [];
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return [];
+		}
+
+		return this.avet.get(attrId)?.get(valueKey(value))?.slice() ?? [];
 	}
 
 	getTransactions(): readonly TransactionRecord[] {
@@ -1757,7 +1825,8 @@ export class FactDatabase {
 
 		const state = new Map<string, unknown>();
 
-		for (const [attribute, facts] of entityAttributes) {
+		for (const [attrId, facts] of entityAttributes) {
+			const attribute = this.attributeIdents.get(attrId) as string;
 			for (const [, , value, factTx, op] of facts) {
 				if (factTx > txLimit) {
 					continue;
@@ -1810,7 +1879,7 @@ export class FactDatabase {
 		if (this.tracking !== null) {
 			for (const key of Object.keys(criteria)) {
 				if (key !== 'id') {
-					this.tracking.attributes.add(key);
+					this.tracking.attributes.add(this.internAttribute(key));
 				}
 			}
 		}
@@ -1976,7 +2045,12 @@ export class FactDatabase {
 	}
 
 	private addAvetCandidates(eids: Set<EntityId>, attribute: string, value: unknown, txLimit: number): void {
-		const valueFacts = this.avet.get(attribute)?.get(valueKey(value));
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return;
+		}
+
+		const valueFacts = this.avet.get(attrId)?.get(valueKey(value));
 		if (!valueFacts) {
 			return;
 		}
@@ -2205,7 +2279,7 @@ export class FactDatabase {
 
 		if (this.tracking !== null) {
 			for (const [, attribute] of spec.where) {
-				this.tracking.attributes.add(attribute);
+				this.tracking.attributes.add(this.internAttribute(attribute));
 			}
 		}
 
@@ -2448,7 +2522,12 @@ export class FactDatabase {
 			return criterionMatchesValue(this.attributeValues(eid, attribute, txLimit), value);
 		}
 
-		const facts = this.eavt.get(eid)?.get(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return false;
+		}
+
+		const facts = this.eavt.get(eid)?.get(attrId);
 		if (!facts) {
 			return false;
 		}
@@ -2535,7 +2614,8 @@ export class FactDatabase {
 			return this.orderCandidates(eids);
 		}
 
-		const attributeEntities = this.aevt.get(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		const attributeEntities = attrId === undefined ? undefined : this.aevt.get(attrId);
 		if (attributeEntities) {
 			for (const [eid, facts] of attributeEntities) {
 				for (const fact of facts) {
@@ -2557,7 +2637,12 @@ export class FactDatabase {
 	 * in insertion order (re-adds move to the end), anything else is last-wins.
 	 */
 	private attributeValues(eid: EntityId, attribute: string, txLimit: number): unknown[] {
-		const facts = this.eavt.get(eid)?.get(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return [];
+		}
+
+		const facts = this.eavt.get(eid)?.get(attrId);
 		if (!facts) {
 			return [];
 		}
@@ -2704,13 +2789,14 @@ export class FactDatabase {
 	private wrapTrackedEntity(entity: EntityState): EntityState {
 		const tracker = this.tracking as AccessTracker;
 		return new Proxy(entity, {
-			get(target, prop, receiver) {
+			get: (target, prop, receiver) => {
 				if (typeof prop === 'string' && prop !== 'id') {
-					tracker.attributes.add(prop);
-					let eids = tracker.eidsByAttribute.get(prop);
+					const attrId = this.internAttribute(prop);
+					tracker.attributes.add(attrId);
+					let eids = tracker.eidsByAttribute.get(attrId);
 					if (!eids) {
 						eids = new Set();
-						tracker.eidsByAttribute.set(prop, eids);
+						tracker.eidsByAttribute.set(attrId, eids);
 					}
 					eids.add(target.id);
 				}
@@ -2734,29 +2820,33 @@ export class FactDatabase {
 			if (fn === undefined) {
 				throw new Error('live(deps, fn) requires a selector function');
 			}
-			return this.createLiveHandle(fn, false, new Set(input));
+			return this.createLiveHandle(
+				fn,
+				false,
+				new Set(input.map((dep) => this.internAttribute(dep)))
+			);
 		}
 
 		if (isQuerySpec(input)) {
-			const attributes = new Set<string>();
+			const attributes = new Set<number>();
 			for (const [, attribute] of input.where) {
-				attributes.add(attribute);
+				attributes.add(this.internAttribute(attribute));
 			}
 			return this.createLiveHandle(() => this.query(input) as T, false, attributes);
 		}
 
 		const criteria = input;
-		const attributes = new Set<string>();
+		const attributes = new Set<number>();
 		for (const key of Object.keys(criteria)) {
 			if (key !== 'id') {
-				attributes.add(key);
+				attributes.add(this.internAttribute(key));
 			}
 		}
 		return this.createLiveHandle(() => this.find(criteria) as T, false, attributes);
 	}
 
 	/** Creates a LiveHandle and runs its initial evaluation before registering it. */
-	private createLiveHandle<T>(read: () => T, trackReads: boolean, explicitDeps: ReadonlySet<string> | null): LiveHandle<T> {
+	private createLiveHandle<T>(read: () => T, trackReads: boolean, explicitDeps: ReadonlySet<number> | null): LiveHandle<T> {
 		const handle: LiveHandle<T> = {
 			read,
 			trackReads,
@@ -2954,7 +3044,7 @@ export class FactDatabase {
 		}
 
 		handle.fallbackAll = false;
-		const dependencies = new Map<string, Set<EntityId>>();
+		const dependencies = new Map<number, Set<EntityId>>();
 		for (const attribute of attributes) {
 			const eids = new Set<EntityId>();
 			const aevtEntities = this.aevt.get(attribute);
@@ -2984,7 +3074,12 @@ export class FactDatabase {
 		}
 
 		const [eid, attribute] = fact;
-		const candidates = handle.dependencies.get(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return false;
+		}
+
+		const candidates = handle.dependencies.get(attrId);
 		if (!candidates) {
 			return false;
 		}
@@ -3016,7 +3111,7 @@ export class FactDatabase {
 		// retract-then-re-add (set/patch diff updates) does not re-see the
 		// committed value and raise a false cardinality conflict.
 		const oneRetracted = new Map<string, true>();
-		const uniqueState = new Map<string, Map<string, Set<EntityId>>>();
+		const uniqueState = new Map<number, Map<string, Set<EntityId>>>();
 
 		for (const [op, eid, attribute, value] of mutations) {
 			// Value-level rules apply to every write, schema or not: no opaque
@@ -3085,11 +3180,12 @@ export class FactDatabase {
 		eid: EntityId,
 		value: unknown,
 		op: FactOperation,
-		uniqueState: Map<string, Map<string, Set<EntityId>>>
+		uniqueState: Map<number, Map<string, Set<EntityId>>>
 	): void {
+		const attrId = this.internAttribute(attribute);
 		// Defensive copy: the committed index must never be mutated by a
 		// transaction that later fails validation.
-		const base = uniqueState.get(attribute) ?? this.activeUniqueHolders(attribute);
+		const base = uniqueState.get(attrId) ?? this.activeUniqueHolders(attribute);
 		const holders = new Map<string, Set<EntityId>>();
 		for (const [key, set] of base) {
 			holders.set(key, new Set(set));
@@ -3112,7 +3208,7 @@ export class FactDatabase {
 		} else {
 			holders.set(valueKeyString, valueHolders);
 		}
-		uniqueState.set(attribute, holders);
+		uniqueState.set(attrId, holders);
 	}
 
 	/**
@@ -3121,7 +3217,12 @@ export class FactDatabase {
 	 * lazily when a unique constraint is added to pre-existing facts.
 	 */
 	private activeUniqueHolders(attribute: string): Map<string, Set<EntityId>> {
-		return this.uniqueIndex.get(attribute) ?? this.scanUniqueHolders(attribute);
+		const attrId = this.attributeIds.get(attribute);
+		if (attrId === undefined) {
+			return new Map();
+		}
+
+		return this.uniqueIndex.get(attrId) ?? this.scanUniqueHolders(attrId);
 	}
 
 	private activeValues(eid: EntityId, attribute: string): unknown[] {
