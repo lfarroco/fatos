@@ -14,26 +14,32 @@ spec-scoped `subscribe` registry:
 ```
 → { type: 'sync', id, afterTx? }
 ← { type: 'synced', id }
-← { type: 'facts', id, facts }            // facts with tx > afterTx
+← { type: 'snapshot', id, facts, transactions }   // fresh pull (no afterTx):
+                                                  //   current-state facts + full ledger
+← { type: 'facts', id, facts }            // facts with tx > afterTx (chunked on a huge pull)
 ← { type: 'transactions', id, transactions } // ledger with tx > afterTx
 ← { type: 'sync-event', id, event }       // live transaction:committed events
 ```
 
-Values in `facts` use the standard wire tags (`$ref` / `$lookupRef` / `$date` /
-`$bigint`); the client deserializes before replay. The live subscription is
-registered *before* the catch-up is computed and sent, and the whole exchange
-runs synchronously in one event-loop tick, so no commit can fall into the gap
+Values in `facts` and transaction metadata use the standard wire tags (`$ref` /
+`$lookupRef` / `$date` / `$bigint`); the client deserializes before replay. The live
+subscription is registered *before* the catch-up is computed and sent, and the whole
+exchange runs synchronously in one event-loop tick, so no commit can fall into the gap
 between the catch-up snapshot and the live stream.
 
-### 1. Full snapshot pull
+### 1. State snapshot pull (fresh clients)
 
 - **When**: first connect with an empty local client; the recovery path after
   an incremental apply fails (divergence).
-- **How**: `afterTx` is omitted; the server streams the whole fact log + ledger
-  and the client rebuilds with `db.restore()` — the only replay path that
-  preserves schema facts verbatim (negative schema eids are never remapped).
-- **Cost**: O(total facts) transfer and rebuild. The client instance is
-  replaced; apps re-bind to `syncingClient.client`
+- **How**: `afterTx` is omitted; the server streams a `snapshot` frame carrying the
+  minimal current-state fact set (only the latest asserted `'add'` fact per
+  `(eid, attribute, value)` triple — bounded by active state, not history) plus the
+  full ledger, and the client rebuilds with `db.restore()` — the only replay path
+  that preserves schema facts verbatim (negative schema eids are never remapped).
+  The local watermark is set to the ledger head (the server's real tx), so a later
+  reconnect catches up incrementally from the true frontier.
+- **Cost**: O(active state) transfer and rebuild instead of O(total history). The
+  client instance is replaced; apps re-bind to `syncingClient.client`
   (`onClientReplaced` fires).
 
 ### 2. `afterTx` incremental catch-up
@@ -84,8 +90,9 @@ and for tools that never need live updates.
 - **No conflict detection for concurrent local writes.** Writes made to the
   local client while it is not the current mirror are overwritten by the next
   full pull or catch-up; the watermark always tracks the server's tx numbers.
-- **Transaction metadata is not value-tagged on the wire** (Date/bigint in
-  metadata survive as their JSON forms), matching the existing
-  `GET /transactions` behavior.
+- **Transaction metadata is value-tagged on the wire.** Since the B4.3 work, the
+  server serializes transaction metadata with the design/03 tags (`$date` / `$bigint` /
+  `$ref`) and the syncing client revives them before storage, so metadata round-trips
+  losslessly on the sync path.
 - **Text frames only.** The sync protocol uses JSON text frames; the client
   ignores non-string message data.

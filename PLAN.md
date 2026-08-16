@@ -451,9 +451,10 @@ bottleneck list lives there; this checklist mirrors completion status:
 - [x] B2 — Chunked WebSocket catch-up: full-log pulls stream bounded `facts` frames;
       the syncing client accumulates frames
 - [x] B3 — WebSocket broadcast serialized once per event (not once per client)
-- [ ] B4 — Deferred: state-snapshot sync for fresh clients, append modes for
+- [x] B4 — State-snapshot sync for fresh clients, append modes for
       Postgres/Mongo/IndexedDB, serialized raw WS event fan-out, fine-grained client
-      reactivity, per-subscription broadcast filtering
+      reactivity, per-subscription broadcast filtering (details in
+      [docs/performance-bottlenecks.md](docs/performance-bottlenecks.md))
 
 ## Non-Goals (initial version)
 

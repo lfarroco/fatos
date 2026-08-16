@@ -34,24 +34,27 @@
 
 ## 2. Querying gaps
 
-### 2.1 Already designed (📋)
+### 2.1 Designed and implemented (✅)
+
+All items below were specified in design/02 and are implemented in `@fatos/core`
+as of 2026-08.
 
 | Gap | Where | Notes |
 |---|---|---|
-| `find` operators `$eq $ne $gt $gte $lt $lte $in $nin $exists $contains` | design/02 §"find" | desugars to `QuerySpec`; single evaluation engine |
-| `orderBy`, `limit`, `offset`, `select` | design/02 §"find" | |
-| `pull` dot-paths with ref traversal | design/02 §"pull" | |
-| `db.at(tx)` rename; `db.diff(txA, txB)` | design/02 §"time travel" | `atTransaction` kept as alias |
+| ✅ `find` operators `$eq $ne $gt $gte $lt $lte $in $nin $exists $contains` | design/02 §"find" | single evaluation engine (`operatorMatchesValue`, cardinality-many aware) |
+| ✅ `orderBy`, `limit`, `offset`, `select` | design/02 §"find" | `FindOptions` |
+| ✅ `pull` dot-paths with ref traversal | design/02 §"pull" | `db.pull(eid, paths)` |
+| ✅ `db.at(tx)` rename; `db.diff(txA, txB)` | design/02 §"time travel" | `atTransaction` kept as alias |
 
 ### 2.2 Find-layer gaps (❌ unless noted)
 
 | Gap | Status | Priority |
 |---|---|---|
-| Operators (2.1) | 📋 | P1 — high |
-| `orderBy` / `limit` / `offset` / `select` | 📋 | P1 — high |
-| `$contains` on many-valued attributes | 📋 | P1 — high (fixes known bug) |
-| `$exists` distinguishing null from missing | 📋 | P1 — high |
-| `find` matches many-valued attributes | 📋 | P1 — high |
+| ✅ Operators (2.1) | ✅ | P1 — high (done) |
+| ✅ `orderBy` / `limit` / `offset` / `select` | ✅ | P1 — high (done) |
+| ✅ `$contains` on many-valued attributes | ✅ | P1 — high (fixes the P0 array-find limitation) |
+| ✅ `$exists` distinguishing null from missing | ✅ | P1 — high (done) |
+| ✅ `find` matches many-valued attributes | ✅ | P1 — high (done) |
 
 ### 2.3 Datalog find-shape gaps (❌)
 
@@ -124,9 +127,9 @@ queries are bound to a single database. Out of near-term scope; note as future w
 | `number` / long / double / float | ✅ (distinct types) | ✅ (`number`) | ✅ (`number`) |
 | `boolean` | ✅ | ✅ | ✅ |
 | `null` | — (nil is absence) | — | ✅ (explicit `null` valueType) |
-| `ref` | ✅ | ✅ | 📋 (`ref()`, design/01) |
-| `instant` / `date` | ✅ | ✅ | 📋 (`Date`, design/01) |
-| `bigint` | ✅ | ✅ | 📋 (design/01) |
+| `ref` | ✅ | ✅ | ✅ (`ref()`, design/01) |
+| `instant` / `date` | ✅ | ✅ | ✅ (`Date`, design/01) |
+| `bigint` | ✅ | ✅ | ✅ (design/01) |
 | `uuid` | ✅ | ✅ | ❌ |
 | `uri` | ✅ | ✅ | ❌ |
 | `keyword` / `symbol` | ✅ | ✅ | ❌ (attributes are strings in Fatos) |
@@ -140,8 +143,8 @@ queries are bound to a single database. Out of near-term scope; note as future w
 | `db/ident` | ✅ | ✅ (keywords are attrs; implicit unique) | ✅ |
 | `db/valueType` | ✅ | ✅ | ✅ |
 | `db/cardinality` | ✅ | ✅ | ✅ |
-| `db/unique` (`identity` / `value`) | ✅ | ✅ | 📋 (design/01–02) |
-| `db/ref` | ✅ | ✅ | 📋 (design/01) |
+| `db/unique` (`identity` / `value`) | ✅ | ✅ | ✅ (design/01–02; `unique: 'identity'` upserts + `unique: 'value'` constraint) |
+| `db/ref` | ✅ | ✅ | ✅ (design/01; ref schema attributes / `ref()` values) |
 | `db/doc` | ✅ | ✅ | ❌ (cheap; recommend adding) |
 | `db/index` (opt-in) | ✅ (legacy — all attrs indexed now) | ✅ | N/A — Fatos indexes all attributes |
 | `db/fulltext` | ✅ | ❌ | ❌ (non-goal) |
@@ -154,13 +157,13 @@ queries are bound to a single database. Out of near-term scope; note as future w
 
 | Feature | Status | Notes |
 |---|---|---|
-| lookup refs `[attr, value]` | 📋 | design/01; requires `db/unique` |
-| upsert by identity | 📋 | design/02 §"explicit refs & upserts" |
-| tempid resolution (`temp()`, negative ids) | 📋 | design/01–02 |
+| lookup refs `[attr, value]` | ✅ | design/01; `lookupRef()`, requires `db/unique` |
+| upsert by identity | ✅ | design/02 §"explicit refs & upserts"; `db.upsert()` |
+| tempid resolution (`temp()`, negative ids) | ✅ | design/01–02 |
 | `retractEntity` (whole-entity delete) | ❌ | recommend adding with P1 |
 | component cascade delete | ❌ | depends on `db/isComponent`; defer |
-| uniqueness enforcement (`unique: 'value'`) | 📋 | P1 |
-| ref integrity (ref points to an existing entity) | 📋 | with `db/ref` |
+| uniqueness enforcement (`unique: 'value'`) | ✅ | P1; `uniqueIndex` constraint check on commit |
+| ref integrity (ref points to an existing entity) | ❌ | with `db/ref`; not enforced yet |
 | same-tx schema validation | ❌ bug | P0 — declared-and-written-in-one-tx attributes bypass valueType checks (pinned in `schema.test.ts`) |
 
 ### 3.4 Enforcement correctness
@@ -168,8 +171,8 @@ queries are bound to a single database. Out of near-term scope; note as future w
 - valueType enforcement: ✅ (but same-tx bug above)
 - cardinality one/many: ✅
 - cardinality-one conflict rejection: ✅
-- unique: 📋 P1
-- ref existence: 📋 P1
+- unique: ✅ (`unique: 'value'` constraint check on commit)
+- ref existence: ❌ (not enforced yet)
 
 ## 4. Rules
 

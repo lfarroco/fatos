@@ -1,8 +1,9 @@
 # Performance Bottlenecks — Task List
 
-Status: **In progress.** Identified during a server-side performance review (2026-08-15).
-Each item below documents a bottleneck, the fix, and its status. Completed items link
-the code that landed; deferred items are scoped follow-ups.
+Status: **Complete.** Identified during a server-side performance review (2026-08-15);
+all items B1–B4 were implemented the same day. Each item below documents a
+bottleneck, the fix, and its status. Completed items link the code that landed;
+remaining notes are scoped follow-ups.
 
 ## Background
 
@@ -74,25 +75,69 @@ behavior*, not raw engine throughput.
   shared string (`packages/server/src/index.ts`). The zero-client guard preserves the
   original "no work when nobody is listening" behavior.
 
-## B4 — Deferred / follow-up tasks
+## B4 — Deferred / follow-up tasks (ALL FIXED)
 
-1. **State-snapshot sync for fresh clients.** A brand-new client still pulls the full
-   append-only fact log (now chunked, so per-frame size is bounded, but total bytes are
-   still O(n)). A compact "current entity states" pull would bound a fresh sync to the
-   active state instead of all history. Protocol + client changes.
-2. **Append modes for Postgres / Mongo / IndexedDB.** These still fall back to the
-   full-snapshot `save()` per transaction. Postgres could append rows to a facts/ledger
-   table; Mongo could insert per-transaction documents; IndexedDB could append to an
-   object store. Schema/contract work, same `StorageAdapter.append` surface.
-3. **Serialize the raw WS event fan-out values.** The design/03 raw `fact:added` /
-   `transaction:committed` fan-out stringifies raw engine values; transactions
-   containing Date / bigint / ref values would throw in `JSON.stringify` when clients
-   are connected. The `sync` protocol already serializes properly (its `sync-event`
-   path). The raw fan-out should serialize via the same wire tags.
-4. **Fine-grained client reactivity.** `@fatos/client`'s `observe*`/`subscribe` notify
-   all listeners on every write (documented in docs/design/03). The core `live` handle
-   already prunes by relevance; the coarse client notification layer does not.
-5. **Broadcast amplification on many subscribers.** Every `transaction:committed` /
-   `fact:added` event is sent to every connected client even when only a subset is
-   subscribed to the `sync`/`subscribe` protocols. Per-subscription filtering would
-   bound fan-out by actual interest.
+1. **State-snapshot sync for fresh clients (FIXED).** A brand-new client no longer
+   pulls the full append-only fact log. `handleSync` serves fresh pulls (no `afterTx`)
+   a compact `snapshot` frame: the minimal current-state fact set (only the latest
+   asserted `'add'` fact per `(eid, attribute, value)` triple, `currentStateFacts` in
+   `packages/server/src/index.ts`) plus the full ledger, bounded by active state
+   instead of history. The client (`packages/client/src/sync.ts`) rebuilds via
+   `db.restore()`, which preserves schema facts verbatim; its watermark stays at the
+   ledger head so a later reconnect catches up incrementally. The chunked full-log pull
+   remains the fallback and the `afterTx` incremental path is unchanged.
+   - Tests: server "streams a compact state snapshot for fresh pulls"; client
+     `sync.test.ts` snapshot-path coverage.
+2. **Append modes for Postgres / Mongo / IndexedDB (FIXED).** All three adapters now
+   implement the `StorageAdapter.append(transaction, facts)` fast path, mirroring
+   `FileAdapter`'s snapshot + append-log pattern (`packages/persistence/src/adapters/`):
+   - `PostgresAdapter` — second table `fatos_log` (default, configurable via
+     `options.logTable`), one row per committed transaction (`INSERT … ON CONFLICT (id)
+     DO NOTHING`, id = tx); `load()` replays log rows with `id >` the snapshot's last tx.
+   - `MongoAdapter` — per-transaction log documents; `load()` merges snapshot doc + log
+     docs newer than the snapshot. The adapter exposes `append` only when the injected
+     collection supports insertion; otherwise it omits it and the server falls back to
+     `save()`.
+   - `IndexedDBAdapter` — second object store keyed by tx; `load()` merges; `save()`
+     remains the checkpoint that truncates the log.
+   - Tests: per-adapter append-replay, checkpoint truncation, no-double-replay,
+     save-then-append round-trips.
+3. **Serialize the raw WS event fan-out values (FIXED).** The raw `fact:added` /
+   `transaction:committed` fan-out now serializes through the design/03 wire tags:
+   `serializeServerEventForWire` / `serializeTransactionRecord` /
+   `serializeMetadata` (`packages/server/src/index.ts`) tag `$date` / `$bigint` /
+   `$ref` values and tag transaction metadata, so `JSON.stringify` never throws
+   (bigint) or silently corrupts refs to `{}` / Dates to untagged strings. The same
+   serializers cover the SSE endpoint, the HTTP `/transact` responses, and the REST
+   `GET /transactions` / `GET /facts/:id` responses (entity attribute values are
+   wire-tagged too); the sync `sync-event` and `transactions` frames use them as well.
+   - Tests: WS clients receiving transactions containing Date / bigint / ref values
+     assert `$date` / `$bigint` / `$ref` wire tags round-trip; REST entity +
+     transactions endpoints return tagged values.
+4. **Fine-grained client reactivity (FIXED).** `@fatos/client`'s `observe` /
+   `observeQuery` / `observeEntity` are now built on the core `db.live` handles
+   (`packages/client/src/index.ts`), so a write touching attributes outside an
+   observer's criteria never wakes it — the core tracker prunes by attribute (AEVT)
+   before diffing, and the callback fires only on relevant, actually-changed results.
+   `observeTransactions` stays on the every-write listener (ledger reads are not
+   live-tracked; it already dedupes by `stableKey`).
+   - Tests: client tests asserting observers do not fire on unrelated transactions and
+     do fire on relevant ones.
+5. **Broadcast amplification on many subscribers (FIXED — registry gating).** The raw
+   `transaction:committed` / `fact:added` fan-out is the DevTools/audit stream
+   (design/03) and now reaches only *bare* clients — those holding no `subscribe` or
+   `sync` registration (`isRawStreamRecipient` in `packages/server/src/index.ts`).
+   Clients with active registrations receive their own tailored frames (spec-filtered
+   `facts` / `sync-event`) and are excluded from the redundant raw broadcast, so a
+   fleet of sync/subscribe clients stops amplifying every commit to every connection.
+   Per-spec filtering (only facts matching a client's `QuerySpec`s) is a scoped
+   follow-up if fan-out volume still matters on large deployments.
+   - Tests: a three-client test asserting bare clients receive raw events, subscribed
+     (`subscribe`/`sync`) clients do not, and an unsubscribed client re-joins the stream.
+
+### Remaining follow-ups (not part of B1–B4)
+
+- Real-browser smoke test for the IndexedDB adapter (verified only against the test
+  fake so far).
+- `observeTransactions` could migrate to live handles if core ever tracks ledger reads.
+- Per-spec raw-event filtering (only facts matching a client's subscriptions).

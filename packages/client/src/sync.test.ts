@@ -100,6 +100,16 @@ describe('parseSyncMessage', () => {
 			id: 's1',
 			transactions: [[2, 2000, { m: 1 }]]
 		});
+		expect(
+			parseSyncMessage(
+				json({
+					type: 'snapshot',
+					id: 's1',
+					facts: [[1, 'a', 'x', 1, 'add']],
+					transactions: [[1, 100, null]]
+				})
+			)
+		).toEqual({ type: 'snapshot', id: 's1', facts: [[1, 'a', 'x', 1, 'add']], transactions: [[1, 100, null]] });
 		expect(parseSyncMessage(json({ type: 'sync-event', id: 's1', event: tx1 }))).toEqual({
 			type: 'sync-event',
 			id: 's1',
@@ -113,6 +123,9 @@ describe('parseSyncMessage', () => {
 		expect(parseSyncMessage(json({ type: 'synced', id: '' }))).toBeNull(); // empty id
 		expect(parseSyncMessage(json({ type: 'nope', id: 's1' }))).toBeNull();
 		expect(parseSyncMessage(json({ type: 'facts', id: 's1', facts: [[1, 'a', 'x', 'bad', 'add']] }))).toBeNull();
+		expect(
+			parseSyncMessage(json({ type: 'snapshot', id: 's1', facts: 'nope', transactions: [] }))
+		).toBeNull();
 		expect(parseSyncMessage(json({ type: 'transactions', id: 's1', transactions: [[1, 'x', null]] }))).toBeNull();
 		expect(
 			parseSyncMessage(json({ type: 'sync-event', id: 's1', event: { type: 'facts', transaction: tx1.transaction, facts: tx1.facts } }))
@@ -476,6 +489,127 @@ describe('createSyncingClient (fake socket)', () => {
 		expect(syncing.getStatus()).toBe('idle');
 	});
 });
+
+describe('snapshot catch-up', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('applies a snapshot frame from a fresh sync, mirroring current state with schema intact', () => {
+		const harness = socketHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+		socket.message(json(synced(syncing.id)));
+
+		// The server's history spans txs 1-5; only the facts still asserted in
+		// the current state are in the frame, and the ledger is the full one
+		// (txs 4-5 hold only retractions, so they have no snapshot facts).
+		socket.message(
+			json({
+				type: 'snapshot',
+				id: syncing.id,
+				facts: [
+					[-1, 'db/ident', 'user/name', 1, 'add'],
+					[-1, 'db/valueType', 'string', 1, 'add'],
+					[-1, 'db/cardinality', 'one', 1, 'add'],
+					[1, 'user/name', 'Alicia', 2, 'add'],
+					[3, 'user/born', { $date: 1_700_000_000_000 }, 3, 'add']
+				],
+				transactions: [
+					[1, 1000, null],
+					[2, 2000, null],
+					[3, 3000, null],
+					[4, 4000, { m: 1 }],
+					[5, 5000, null]
+				]
+			})
+		);
+
+		// State matches the server's current state (retracted triples gone,
+		// wire tags revived), the schema survives verbatim and stays live, and
+		// the watermark is the FULL ledger head, not the trimmed subset's.
+		expect(syncing.client.getFacts()).toEqual([
+			[-1, 'db/ident', 'user/name', 1, 'add'],
+			[-1, 'db/valueType', 'string', 1, 'add'],
+			[-1, 'db/cardinality', 'one', 1, 'add'],
+			[1, 'user/name', 'Alicia', 2, 'add'],
+			[3, 'user/born', new Date(1_700_000_000_000), 3, 'add']
+		]);
+		expect(syncing.client.entity(1)).toEqual({ id: 1, 'user/name': 'Alicia' });
+		expect(syncing.client.entity(3)).toEqual({ id: 3, 'user/born': new Date(1_700_000_000_000) });
+		expect(syncing.client.entity(2)).toBeNull();
+		expect(syncing.client.getSchemas().map((schema) => schema.ident)).toEqual(['user/name']);
+		expect(() => syncing.client.add(1, 'user/name', 'Bob')).toThrow(/Cardinality conflict/);
+		expect(syncing.getLastAppliedTx()).toBe(5);
+		syncing.stop();
+	});
+
+	it('applies live events after a snapshot and reconnects from the real watermark', () => {
+		vi.useFakeTimers();
+		const harness = socketHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			reconnectDelayMs: 10,
+			onError: (error) => errors.push(error)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+		socket.message(json(synced(syncing.id)));
+		socket.message(
+			json({
+				type: 'snapshot',
+				id: syncing.id,
+				facts: [
+					[-1, 'db/ident', 'user/name', 1, 'add'],
+					[-1, 'db/valueType', 'string', 1, 'add'],
+					[-1, 'db/cardinality', 'one', 1, 'add'],
+					[1, 'user/name', 'Alicia', 2, 'add']
+				],
+				transactions: [
+					[1, 1000, null],
+					[2, 2000, null],
+					[3, 3000, null]
+				]
+			})
+		);
+		expect(syncing.getLastAppliedTx()).toBe(3);
+
+		// Live event at the server's next tx applies to the same client.
+		const stableClient = syncing.client;
+		socket.message(
+			json({
+				type: 'sync-event',
+				id: syncing.id,
+				event: {
+					type: 'transaction:committed',
+					transaction: [4, 4000, null],
+					facts: [[2, 'user/name', 'Bob', 4, 'add']]
+				}
+			})
+		);
+		expect(syncing.client).toBe(stableClient);
+		expect(syncing.client.entity(2)).toEqual({ id: 2, 'user/name': 'Bob' });
+		expect(syncing.getLastAppliedTx()).toBe(4);
+
+		// Reconnect catches up from the true server head (4), not the subset max.
+		socket.close();
+		vi.advanceTimersByTime(10);
+		const socket2 = harness.current();
+		socket2.open();
+		expect(JSON.parse(socket2.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 4 });
+		expect(errors).toEqual([]);
+		syncing.stop();
+	});
+});
+
 
 describe('chunked catch-up', () => {
 	afterEach(() => {

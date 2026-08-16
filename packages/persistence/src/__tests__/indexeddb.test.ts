@@ -2,7 +2,8 @@
  * IndexedDBAdapter tests against a tiny fake `indexedDB` stubbed onto
  * globalThis (jsdom-less; environment is Node). The fake implements just the
  * structural surface the adapter uses: open → db → transaction → object store
- * → get/put requests, with asynchronous resolution.
+ * → get/getAll/put/delete requests, with asynchronous resolution, plus the
+ * snapshot and append-log object stores.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -32,33 +33,77 @@ class FakeOpenRequest extends FakeRequest<FakeDatabase> {
 }
 
 class FakeObjectStore {
-	private readonly records = new Map<string, unknown>();
+	private readonly records = new Map<number | string, unknown>();
 
-	get(key: string): FakeRequest<unknown> {
+	get(key: number | string): FakeRequest<unknown> {
 		const request = new FakeRequest<unknown>();
 		queueMicrotask(() => request.resolve(this.records.get(key)));
 		return request;
 	}
 
-	put(value: unknown, key: string): FakeRequest<unknown> {
+	getAll(): FakeRequest<unknown[]> {
+		const request = new FakeRequest<unknown[]>();
+		queueMicrotask(() => request.resolve([...this.records.values()]));
+		return request;
+	}
+
+	put(value: unknown, key: number | string): FakeRequest<unknown> {
 		const request = new FakeRequest<unknown>();
 		this.records.set(key, value);
 		queueMicrotask(() => request.resolve(value));
 		return request;
 	}
+
+	delete(key: number | string): FakeRequest<unknown> {
+		const request = new FakeRequest<unknown>();
+		this.records.delete(key);
+		queueMicrotask(() => request.resolve(undefined));
+		return request;
+	}
+
+	entries(): ReadonlyMap<number | string, unknown> {
+		return this.records;
+	}
 }
 
 class FakeDatabase {
-	readonly store = new FakeObjectStore();
+	readonly stores = new Map<string, FakeObjectStore>();
 	closed = false;
-	objectStoreNames = { contains: () => true };
 
-	createObjectStore(): FakeObjectStore {
-		return this.store;
+	constructor() {
+		// The adapter opens both stores (version 2); the fake pre-registers
+		// them so the upgrade handler's contains() checks are no-ops.
+		this.stores.set('snapshot', new FakeObjectStore());
+		this.stores.set('log', new FakeObjectStore());
 	}
 
-	transaction(_name: string, _mode: 'readonly' | 'readwrite'): { objectStore: () => FakeObjectStore } {
-		return { objectStore: () => this.store };
+	objectStoreNames = {
+		contains: (name: string) => this.stores.has(name)
+	};
+
+	createObjectStore(name: string): FakeObjectStore {
+		let store = this.stores.get(name);
+		if (!store) {
+			store = new FakeObjectStore();
+			this.stores.set(name, store);
+		}
+		return store;
+	}
+
+	transaction(
+		names: string | readonly string[],
+		_mode: 'readonly' | 'readwrite'
+	): { objectStore: (name: string) => FakeObjectStore } {
+		const list = typeof names === 'string' ? [names] : [...names];
+		return {
+			objectStore: (name: string) => {
+				const store = this.stores.get(name);
+				if (!store) {
+					throw new Error(`fake: no object store "${name}"`);
+				}
+				return store;
+			}
+		};
 	}
 
 	close(): void {
@@ -87,6 +132,7 @@ function createFakeIndexedDB(): { open: (name: string) => FakeOpenRequest; datab
 		databases: () => databases
 	};
 }
+
 
 afterEach(() => {
 	(globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDB;
@@ -153,8 +199,121 @@ describe('IndexedDBAdapter', () => {
 		// Open once through the adapter path so the database exists.
 		const adapter = new IndexedDBAdapter({ databaseName: 'corrupt' });
 		await adapter.load();
-		fake.databases().get('corrupt')?.store.put({ key: 'fatos-snapshot' }, 'fatos-snapshot');
+		fake.databases().get('corrupt')?.stores.get('snapshot')?.put({ key: 'fatos-snapshot' }, 'fatos-snapshot');
 
 		await expect(adapter.load()).rejects.toThrow(/stored snapshot record is malformed/);
+	});
+
+	it('replays append-only writes through load()', async () => {
+		(globalThis as { indexedDB?: unknown }).indexedDB = createFakeIndexedDB();
+		const adapter = new IndexedDBAdapter();
+
+		await adapter.append([1, 1, null], [[1, 'type', 'user', 1, 'add']]);
+		await adapter.append([2, 2, null], [[1, 'age', 30, 2, 'add']]);
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([
+			[1, 1, null],
+			[2, 2, null]
+		]);
+		expect(loaded.facts).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[1, 'age', 30, 2, 'add']
+		]);
+	});
+
+	it('merges the snapshot with newer log entries, in order, without duplication', async () => {
+		(globalThis as { indexedDB?: unknown }).indexedDB = createFakeIndexedDB();
+		const adapter = new IndexedDBAdapter();
+		const snapshot = makeRichSnapshot();
+
+		await adapter.save(snapshot);
+		await adapter.append([4, 4, null], [[3, 'user/name', 'Carol', 4, 'add']]);
+
+		const loaded = await adapter.load();
+		expect(comparableFacts(loaded.facts)).toEqual([
+			...comparableFacts(snapshot.facts),
+			[3, 'user/name', 'Carol', 4, 'add']
+		]);
+		expect(loaded.transactions).toEqual([...snapshot.transactions, [4, 4, null]]);
+	});
+
+	it('checkpoint truncates the append log after save()', async () => {
+		const fake = createFakeIndexedDB();
+		(globalThis as { indexedDB?: unknown }).indexedDB = fake;
+		const adapter = new IndexedDBAdapter();
+
+		await adapter.append([1, 1, null], [[1, 'type', 'user', 1, 'add']]);
+		await adapter.append([2, 2, null], [[1, 'age', 30, 2, 'add']]);
+
+		await adapter.save({
+			facts: [
+				[1, 'type', 'user', 1, 'add'],
+				[1, 'age', 30, 2, 'add']
+			],
+			transactions: [
+				[1, 1, null],
+				[2, 2, null]
+			]
+		});
+
+		// The checkpoint clears log entries at or below the snapshot's last tx.
+		const logStore = fake.databases().get('fatos')?.stores.get('log');
+		expect(logStore?.entries().size).toBe(0);
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([
+			[1, 1, null],
+			[2, 2, null]
+		]);
+		expect(loaded.facts).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[1, 'age', 30, 2, 'add']
+		]);
+	});
+
+	it('skips log entries whose tx is already inside the snapshot', async () => {
+		(globalThis as { indexedDB?: unknown }).indexedDB = createFakeIndexedDB();
+		const adapter = new IndexedDBAdapter();
+		const snapshot = makeRichSnapshot();
+
+		await adapter.save(snapshot);
+		// Re-append the last snapshot transaction: it was already checkpointed
+		// (crash between checkpoint and log truncate must not double-replay).
+		const lastTx = snapshot.transactions[snapshot.transactions.length - 1];
+		await adapter.append(lastTx, snapshot.facts.filter((fact) => fact[3] === lastTx[0]));
+
+		const loaded = await adapter.load();
+		expect(comparableFacts(loaded.facts)).toEqual(comparableFacts(snapshot.facts));
+		expect(loaded.transactions).toEqual(snapshot.transactions);
+	});
+
+	it('save-then-append-then-load round-trip preserves transaction order', async () => {
+		(globalThis as { indexedDB?: unknown }).indexedDB = createFakeIndexedDB();
+		const adapter = new IndexedDBAdapter();
+
+		await adapter.save({
+			facts: [
+				[1, 'type', 'user', 1, 'add'],
+				[1, 'age', 30, 2, 'add']
+			],
+			transactions: [
+				[1, 1, null],
+				[2, 2, null]
+			]
+		});
+		await adapter.append([3, 3, null], [[1, 'name', 'Alice', 3, 'add']]);
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([
+			[1, 1, null],
+			[2, 2, null],
+			[3, 3, null]
+		]);
+		expect(loaded.facts).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[1, 'age', 30, 2, 'add'],
+			[1, 'name', 'Alice', 3, 'add']
+		]);
 	});
 });

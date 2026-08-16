@@ -267,52 +267,44 @@ export class FatosClient extends EventTarget {
 		};
 	}
 
+	/**
+	 * Observes a find-criteria query (B4.4): delivers the initial result
+	 * synchronously, then only results that actually changed. Built on
+	 * `db.live(criteria)` so writes touching attributes outside the criteria
+	 * never wake the observer — core prunes by attribute (AEVT) before the
+	 * result diff, so the callback is only invoked on relevant changes.
+	 */
 	observe(criteria: Record<string, unknown>, callback: (entities: EntityState[]) => void): Unsubscribe {
-		let previous = stableKey(this.find(criteria));
-		callback(this.find(criteria));
-
-		return this.subscribe(() => {
-			const nextResult = this.find(criteria);
-			const next = stableKey(nextResult);
-			if (next === previous) {
-				return;
-			}
-
-			previous = next;
-			callback(nextResult);
-		});
+		const live = this.db.live(criteria);
+		callback(live.current);
+		live.subscribe(callback);
+		return () => live.dispose();
 	}
 
+	/**
+	 * Observes a Datalog query (B4.4), same contract as {@link observe}: built
+	 * on `db.live(spec)`, whose where-clause attributes narrow relevance.
+	 */
 	observeQuery(spec: QuerySpec, callback: (rows: QueryTerm[][]) => void): Unsubscribe {
-		let previous = stableKey(this.query(spec));
-		callback(this.query(spec));
-
-		return this.subscribe(() => {
-			const nextRows = this.query(spec);
-			const next = stableKey(nextRows);
-			if (next === previous) {
-				return;
-			}
-
-			previous = next;
-			callback(nextRows);
-		});
+		const live = this.db.live(spec);
+		callback(live.current);
+		live.subscribe(callback);
+		return () => live.dispose();
 	}
 
+	/**
+	 * Observes one entity (B4.4). Uses the access-tracking `db.live(fn)` form —
+	 * `db.entity` reads are tracked (core live.test.ts 'tracks reads through
+	 * db.entity proxies'). The whole entity is the payload, so the handle
+	 * cannot narrow to recorded attributes (a brand-new attribute on the
+	 * entity must still wake the observer); it falls back to diffing every
+	 * write and the callback fires only when the entity actually changed.
+	 */
 	observeEntity(eid: EntityId, callback: (entity: EntityState | null) => void): Unsubscribe {
-		let previous = stableKey(this.entity(eid));
-		callback(this.entity(eid));
-
-		return this.subscribe(() => {
-			const nextEntity = this.entity(eid);
-			const next = stableKey(nextEntity);
-			if (next === previous) {
-				return;
-			}
-
-			previous = next;
-			callback(nextEntity);
-		});
+		const live = this.db.live(() => this.entity(eid));
+		callback(live.current);
+		live.subscribe(callback);
+		return () => live.dispose();
 	}
 
 	observeTransactions(callback: (transactions: readonly TransactionRecord[]) => void): Unsubscribe {

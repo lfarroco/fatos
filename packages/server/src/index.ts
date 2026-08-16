@@ -152,6 +152,92 @@ function serializeRows(rows: readonly (readonly QueryTerm[])[]): unknown[][] {
 	return rows.map((row) => row.map((term) => serializeValue(term)));
 }
 
+/** Wire-tags a transaction record's metadata values (design/03 $date/$bigint/$ref). */
+function serializeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(metadata)) {
+		result[key] = serializeValue(value);
+	}
+	return result;
+}
+
+/**
+ * Serializes a transaction record for the wire. `TransactionRecord[2]` is
+ * caller-supplied metadata (`Record<string, unknown>`) and can hold Date /
+ * bigint / ref() values — JSON.stringify of the raw record would throw on a
+ * bigint and silently corrupt refs to `{}` (B4.3).
+ */
+function serializeTransactionRecord(transaction: TransactionRecord): unknown {
+	const metadata = transaction[2];
+	return [transaction[0], transaction[1], metadata === null ? null : serializeMetadata(metadata)];
+}
+
+function serializeTransactions(transactions: readonly TransactionRecord[]): unknown[] {
+	return transactions.map(serializeTransactionRecord);
+}
+
+/** Wire-tags an entity state's attribute values (design/03); `null` passes through. */
+function serializeEntityState(entity: Record<string, unknown> | null): unknown {
+	if (entity === null) {
+		return null;
+	}
+
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(entity)) {
+		result[key] = serializeValue(value);
+	}
+	return result;
+}
+
+/**
+ * Derives the minimal fact set that reproduces the database's current entity
+ * state (B4.1): for each (eid, attribute, value) triple only the latest fact
+ * counts, and only triples whose latest fact is an 'add' are part of the
+ * state. Schema facts (negative eids) are included with their original txs so
+ * `restore()` replays them verbatim. The result is ascending by tx, matching
+ * restore()'s ordering invariants. The triple key is the JSON-wire form of
+ * the value (design/03 tags), which is canonical for every legal stored value.
+ */
+function currentStateFacts(facts: readonly Fact[]): Fact[] {
+	const latestByTriple = new Map<string, Fact>();
+	for (const fact of facts) {
+		const key = `${typeof fact[0]}:${String(fact[0])}\u0000${fact[1]}\u0000${JSON.stringify(serializeValue(fact[2]))}`;
+		latestByTriple.set(key, fact);
+	}
+
+	const current: Fact[] = [];
+	for (const fact of latestByTriple.values()) {
+		if (fact[4] === 'add') {
+			current.push(fact);
+		}
+	}
+
+	return current.sort((left, right) => left[3] - right[3]);
+}
+
+/**
+ * The raw internal {@link ServerEvent} carries engine values (Date, bigint,
+ * frozen ref objects) that JSON.stringify either throws on (bigint) or
+ * silently corrupts (refs -> `{}`, Dates -> untagged ISO strings). Every
+ * output path — the WS raw fan-out, SSE, and the sync frames — serializes
+ * through this so clients always receive the design/03 JSON tags and
+ * stringify never throws (B4.3).
+ */
+function serializeServerEventForWire(event: ServerEvent): JsonObject {
+	// Check the single-literal discriminant first: TS cannot exclude the
+	// union-typed `'fact:added' | 'fact:retracted'` member from the else
+	// branch of a two-sided comparison, but a single `===` literal narrows.
+	if (event.type === 'transaction:committed') {
+		return {
+			type: event.type,
+			transaction: serializeTransactionRecord(event.transaction),
+			facts: serializeFacts(event.facts)
+		};
+	}
+
+	return { type: event.type, fact: serializeFact(event.fact) };
+}
+
 /**
  * Deserializes tagged values inside a transaction entry tuple (design/03).
  * Schema declaration objects pass through untouched; 4-tuples are mutations,
@@ -336,18 +422,40 @@ export class FatosServer {
 			return;
 		}
 
-		const recipients = [...this.websocketServer.clients].filter((client) => client.readyState === 1);
+		// B4.5: the raw fan-out is the DevTools/audit stream (design/03) for
+		// bare connections — clients holding no subscribe/sync registration.
+		// Clients with active registrations receive their own tailored frames
+		// (spec-filtered `facts` / `sync-event`) and would only be re-sent the
+		// same data redundantly, so they are excluded.
+		const recipients = [...this.websocketServer.clients].filter(
+			(client) => client.readyState === 1 && this.isRawStreamRecipient(client)
+		);
 		if (recipients.length === 0) {
 			return;
 		}
 
 		// Serialize once and share the string: the payload is identical for
 		// every client, so per-client JSON.stringify is N× wasted work on the
-		// event loop of every committed transaction.
-		const serialized = JSON.stringify(event);
+		// event loop of every committed transaction. The event is serialized
+		// through the wire form first (B4.3): raw engine values (bigint, ref,
+		// Date) would throw or corrupt under JSON.stringify.
+		const serialized = JSON.stringify(serializeServerEventForWire(event));
 		for (const client of recipients) {
 			client.send(serialized);
 		}
+	}
+
+	/**
+	 * True when the client holds no subscribe- or sync-protocol entry — a bare
+	 * connection watching the raw audit stream (design/03: "the raw
+	 * `fact:added` / `transaction:committed` fan-out stays for DevTools/audit
+	 * streams").
+	 */
+	private isRawStreamRecipient(client: WebSocket): boolean {
+		return (
+			(this.clientSubscriptions.get(client)?.size ?? 0) === 0
+			&& (this.syncSubscriptions.get(client)?.size ?? 0) === 0
+		);
 	}
 
 	/**
@@ -485,8 +593,10 @@ export class FatosServer {
 	 *
 	 *   -> { type: 'sync', id, afterTx? }
 	 *   <- { type: 'synced', id }
-	 *   <- { type: 'facts', id, facts }            // facts with tx > afterTx;
-	 *                                            //   full pulls arrive as
+	 *   <- { type: 'snapshot', id, facts, transactions } // fresh pull (no afterTx):
+	 *                                                //   current-state facts + full ledger
+	 *   <- { type: 'facts', id, facts }            // afterTx catch-up; a huge
+	 *                                            //   full-log pull arrives as
 	 *                                            //   multiple chunks
 	 *   <- { type: 'transactions', id, transactions } // ledger with tx > afterTx
 	 *   <- live: { type: 'sync-event', id, event }
@@ -521,7 +631,7 @@ export class FatosServer {
 				id,
 				event: {
 					type: event.type,
-					transaction: event.transaction,
+					transaction: serializeTransactionRecord(event.transaction),
 					facts: serializeFacts(event.facts)
 				}
 			});
@@ -531,8 +641,22 @@ export class FatosServer {
 
 		this.sendWebSocket(client, { type: 'synced', id });
 
-		const facts = this.db.getFacts().filter((fact) => afterTx === undefined || fact[3] > afterTx);
-		const transactions = this.db.getTransactions().filter(([tx]) => afterTx === undefined || tx > afterTx);
+		// Fresh pulls (no afterTx) get the compact state snapshot (B4.1):
+		// current entity facts only — bounded by active state, not history —
+		// plus the full ledger so the client's watermark is the real server
+		// head. Incremental pulls keep the chunked full-log catch-up below.
+		if (afterTx === undefined) {
+			this.sendWebSocket(client, {
+				type: 'snapshot',
+				id,
+				facts: serializeFacts(currentStateFacts(this.db.getFacts())),
+				transactions: serializeTransactions(this.db.getTransactions())
+			});
+			return;
+		}
+
+		const facts = this.db.getFacts().filter((fact) => fact[3] > afterTx);
+		const transactions = this.db.getTransactions().filter(([tx]) => tx > afterTx);
 		// Stream the catch-up in bounded tx-ordered chunks (the db fact log is
 		// append-ordered, so consecutive slices stay ascending by tx). The
 		// client accumulates `facts` frames and applies the catch-up when the
@@ -545,7 +669,7 @@ export class FatosServer {
 				facts: serializeFacts(facts.slice(offset, offset + SYNC_CATCH_UP_CHUNK))
 			});
 		}
-		this.sendWebSocket(client, { type: 'transactions', id, transactions });
+		this.sendWebSocket(client, { type: 'transactions', id, transactions: serializeTransactions(transactions) });
 	}
 
 	private getSyncRegistry(client: WebSocket): Map<string, { id: string; unsubscribe: Unsubscribe }> {
@@ -721,7 +845,7 @@ export class FatosServer {
 
 		const unsubscribe = this.subscribe((event) => {
 			res.write(`event: ${event.type}\n`);
-			res.write(`data: ${JSON.stringify(event)}\n\n`);
+			res.write(`data: ${JSON.stringify(serializeServerEventForWire(event))}\n\n`);
 		});
 
 		req.on('close', () => {
@@ -767,13 +891,13 @@ export class FatosServer {
 				}
 
 				const entity = this.db.entity(eid, tx);
-				writeJson(res, 200, { entity });
+				writeJson(res, 200, { entity: serializeEntityState(entity) });
 				return;
 			}
 
 			if (method === 'GET' && pathname === '/transactions') {
 				writeJson(res, 200, {
-					transactions: this.db.getTransactions()
+					transactions: serializeTransactions(this.db.getTransactions())
 				});
 				return;
 			}
@@ -790,9 +914,10 @@ export class FatosServer {
 					: undefined;
 				const entries = (body.entries as unknown[]).map(deserializeEntry) as TransactionEntry[];
 				const facts = this.transact(entries, metadata);
+				const transaction = this.db.getTransactions().at(-1);
 				writeJson(res, 200, {
 					facts: serializeFacts(facts),
-					transaction: this.db.getTransactions().at(-1) ?? null
+					transaction: transaction === undefined ? null : serializeTransactionRecord(transaction)
 				});
 				return;
 			}
@@ -824,9 +949,10 @@ export class FatosServer {
 				}
 
 				const facts = this.transact(entries, metadata);
+				const transaction = this.db.getTransactions().at(-1);
 				writeJson(res, 200, {
 					facts: serializeFacts(facts),
-					transaction: this.db.getTransactions().at(-1) ?? null
+					transaction: transaction === undefined ? null : serializeTransactionRecord(transaction)
 				});
 				return;
 			}

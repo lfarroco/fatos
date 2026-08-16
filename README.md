@@ -96,4 +96,5 @@ Early stage - features and APIs are subject to change.
 
 ## License
 
-(To be determined)
+MIT — see [LICENSE](./LICENSE).
+

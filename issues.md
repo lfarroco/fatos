@@ -810,3 +810,120 @@ back to sub-agents for fixes.
   snapshot.ts:52/67. Validation: eslint exits 0 in both packages (client still
   has 1 pre-existing `explicit-module-boundary-types` warning in index.ts:262,
   unrelated), `tsc --noEmit` clean, client 34 tests + devtools 74 tests green.
+---
+## [2026-08-15] server+client — B4.3 raw WS event fan-out now wire-safe
+- **Task**: B4.3 — serialize the raw WS event fan-out values
+- **Found by**: server performance review (docs/performance-bottlenecks.md)
+- **Severity**: high (crash / silent corruption on Date/bigint/ref writes with connected clients)
+- **Status**: fixed
+- **Description**: `FatosServer.transact()` emitted raw engine facts into the
+  `fact:added` / `transaction:committed` fan-out, and `broadcastWebSocketEvent`
+  / the SSE endpoint / the HTTP `/transact` responses `JSON.stringify`'d them
+  directly: bigint values threw `TypeError`, `ref()` values (Symbol-keyed
+  frozen objects) silently collapsed to `{}`, Dates lost their `$date` tag.
+- **Resolution**: `serializeServerEventForWire` / `serializeTransactionRecord` /
+  `serializeMetadata` / `serializeEntityState` in `packages/server/src/index.ts`
+  tag values through the design/03 wire tags everywhere the raw event or
+  transaction/entity data leaves the server — WS raw fan-out, SSE, HTTP
+  `/transact`, `GET /transactions`, `GET /facts/:id` — and the sync
+  `sync-event` / `transactions` frames use the same serializers. The syncing
+  client revives tagged metadata (`deserializeMetadata`) before storing it.
+  Validation: server 21 tests green (added WS Date/bigint/ref + REST endpoint
+  tests), client sync tests green, repo suite 458 tests green.
+
+## [2026-08-15] server — B4.5 raw broadcast scoped to bare (audit-stream) clients
+- **Task**: B4.5 — per-subscription broadcast filtering
+- **Found by**: server performance review
+- **Severity**: medium (fan-out amplification on many subscribed connections)
+- **Status**: fixed
+- **Description**: every `transaction:committed` / `fact:added` event was sent
+  to every connected WebSocket client even when only a subset held `subscribe`
+  or `sync` registrations — those clients were re-sent the same data they
+  already receive as tailored frames (`facts` / `sync-event`).
+- **Resolution**: `broadcastWebSocketEvent` now reaches only *bare* clients —
+  those holding no entry in the `clientSubscriptions` or `syncSubscriptions`
+  registry (`isRawStreamRecipient` in `packages/server/src/index.ts`). This
+  preserves the design/03 raw fan-out for DevTools/audit streams (bare
+  connections, as the `packages/examples` server/full-stack demos use) while
+  skipping the redundant broadcast for subscribed clients. Per-spec filtering
+  (only facts matching a client's QuerySpecs) remains a scoped follow-up.
+  Validation: server tests green (three-client test: bare receives raw,
+  subscribed clients do not, unsubscribed client re-joins the stream);
+  examples tests green; full repo suite green.
+
+## [2026-08-15] server+client — B4.1 state-snapshot sync for fresh clients
+- **Task**: B4.1 — bound fresh-client sync to active state, not history
+- **Found by**: server performance review
+- **Severity**: medium (fresh clients pulled the whole fact log, O(history))
+- **Status**: fixed
+- **Description**: a brand-new syncing client full-pulled the entire append-only
+  fact log (chunked per frame, but O(total history) bytes).
+- **Resolution**: `handleSync` serves fresh pulls (no `afterTx`) a `snapshot`
+  frame: the minimal current-state fact set (`currentStateFacts` — only the
+  latest asserted `'add'` fact per `(eid, attribute, value)` triple) plus the
+  full ledger. The client (`packages/client/src/sync.ts` `applySnapshot`)
+  rebuilds via `db.restore()`, preserving schema facts verbatim, and sets its
+  watermark to the ledger head so a later reconnect catches up incrementally.
+  The chunked full-log pull remains the fallback; the `afterTx` path is
+  unchanged. Validation: server + client sync tests green; full repo suite 458
+  tests green. Docs: `docs/sync-strategies.md` updated for the `snapshot` frame.
+
+---
+## [2026-08-15] persistence — B4.2 append modes for Postgres/Mongo/IndexedDB
+- **Task**: B4.2 — `StorageAdapter.append` fast paths for the remaining adapters
+- **Found by**: server performance review
+- **Severity**: medium (O(total facts) snapshot save per tx for these backends)
+- **Status**: fixed
+- **Description**: Postgres / Mongo / IndexedDB adapters fell back to the full
+  snapshot `save()` per transaction while File/Memory used the O(transaction)
+  `append()` fast path.
+- **Resolution**: all three adapters now implement `append(transaction, facts)`
+  mirroring `FileAdapter`'s snapshot + append-log pattern
+  (`packages/persistence/src/adapters/{postgres,mongodb,indexeddb}.ts`):
+  Postgres gains a second `fatos_log` table (configurable via `options.logTable`,
+  `INSERT … ON CONFLICT (id) DO NOTHING`); Mongo gains per-transaction log
+  documents and exposes `append` only when the injected collection supports
+  insertion (otherwise it omits it and the server falls back to `save()`);
+  IndexedDB gains a second object store keyed by tx. `load()` merges the
+  snapshot with log entries newer than the snapshot's last tx (no double-replay),
+  and `save()` remains the checkpoint that truncates the log. Validation:
+  persistence tests green (per-adapter append/replay/checkpoint tests), server
+  tests green. Open limitation: the IndexedDB runtime shape is still verified
+  only against the test fake — a real-browser smoke test is a follow-up.
+
+## [2026-08-15] client — B4.4 fine-grained reactive observers
+- **Task**: B4.4 — observe* only wakes on relevant changes
+- **Found by**: server performance review (client reactivity layer)
+- **Severity**: medium (every-write notifications for spec-scoped observers)
+- **Status**: fixed
+- **Description**: `@fatos/client`'s `observe` / `observeQuery` / `observeEntity`
+  attached a `transaction:committed` listener and re-ran their query on every
+  write, deduping by `stableKey`; core's dependency-tracked live handles already
+  prune by relevance.
+- **Resolution**: the three observers are now built on `this.db.live(...)`
+  (`observe` → `db.live(criteria)`, `observeQuery` → `db.live(spec)`,
+  `observeEntity` → access-tracking `db.live(() => this.entity(eid))`), keeping
+  the synchronous initial callback and `Unsubscribe` contract. `observeTransactions`
+  stays on the every-write listener (ledger reads are not live-tracked; it
+  already dedupes). Validation: client tests green (added "does not fire on
+  unrelated transactions" tests); full repo suite 458 tests green.
+
+## [2026-08-15] repo — CI fix (build + vitest run), LICENSE, gap-analysis refresh
+- **Task**: repo hygiene — CI workflow, MIT license, stale gap-analysis doc
+- **Found by**: coordinator review (2026-08-15)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `.github/workflows/ci.yml` ran `npm test` (vitest watch mode
+  — hangs in CI) without building; `dist/` is gitignored and cross-package
+  imports resolve through built `dist/`, so a fresh checkout had no dist to
+  import. README's License was "To be determined". `docs/gap-analysis-query-schema-rules.md`
+  still marked already-implemented features (find operators, orderBy/limit/
+  offset/select, pull, at/diff, db/unique, db/ref, value types) as "designed,
+  not yet built".
+- **Resolution**: CI now runs `npm ci` → `npm run build` → `npx vitest run` →
+  `npm run types`. Added `LICENSE` (MIT, "Fatos contributors") and pointed
+  README at it. Refreshed the gap-analysis doc: implemented rows verified
+  against `packages/core/src/index.ts` and marked ✅ (2026-08); still-missing
+  items (`retractEntity`, ref existence enforcement, Datalog find shapes, `:in`,
+  aggregates, rules) left as-is.
+

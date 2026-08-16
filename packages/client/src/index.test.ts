@@ -362,3 +362,108 @@ describe('@fatos/client — live queries (P2)', () => {
 		expect(after.done).toBe(true);
 	});
 });
+
+describe('@fatos/client — observe* fine-grained reactivity (B4.4)', () => {
+	it('observe() fires synchronously with the initial result and only on relevant changes', () => {
+		const client = createClient();
+		const callback = vi.fn();
+		client.add(1, 'type', 'user');
+		const unsubscribe = client.observe({ type: 'user' }, callback);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith([{ id: 1, type: 'user' }]);
+
+		callback.mockClear();
+		// Unrelated: a write to a different attribute is pruned entirely.
+		client.add(2, 'name', 'Bob');
+		expect(callback).not.toHaveBeenCalled();
+		// Unrelated: a write to the recorded attribute that does not change
+		// the result (new entity, non-matching value) is diffed away.
+		client.add(2, 'type', 'admin');
+		expect(callback).not.toHaveBeenCalled();
+		// Unrelated: a matching entity gaining an unrelated attribute stays pruned.
+		client.add(1, 'name', 'Alice');
+		expect(callback).not.toHaveBeenCalled();
+
+		// Relevant: a new entity matches the criteria (fresh full snapshot,
+		// including the pruned-but-now-present attribute).
+		client.add(3, 'type', 'user');
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith([
+			{ id: 1, type: 'user', name: 'Alice' },
+			{ id: 3, type: 'user' }
+		]);
+
+		unsubscribe();
+		client.add(4, 'type', 'user');
+		expect(callback).toHaveBeenCalledTimes(1);
+	});
+
+	it('observeQuery() fires synchronously with the initial rows and only on relevant changes', () => {
+		const client = createClient();
+		const callback = vi.fn();
+		client.add(1, 'user/role', 'admin');
+		const unsubscribe = client.observeQuery(
+			{ find: ['?e'], where: [['?e', 'user/role', 'admin']] },
+			callback
+		);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith([[1]]);
+
+		callback.mockClear();
+		// Unrelated: a write to an attribute outside the where clause.
+		client.add(1, 'user/name', 'Alice');
+		expect(callback).not.toHaveBeenCalled();
+		// Unrelated: a write to the queried attribute that does not change the rows.
+		client.add(2, 'user/role', 'viewer');
+		expect(callback).not.toHaveBeenCalled();
+
+		// Relevant: a new entity matches the query.
+		client.add(3, 'user/role', 'admin');
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith([[1], [3]]);
+
+		unsubscribe();
+		client.add(4, 'user/role', 'admin');
+		expect(callback).toHaveBeenCalledTimes(1);
+	});
+
+	it('observeEntity() fires synchronously with the entity and only when it actually changes', () => {
+		const client = createClient();
+		const callback = vi.fn();
+		client.add(1, 'name', 'Alice');
+		const unsubscribe = client.observeEntity(1, callback);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith({ id: 1, name: 'Alice' });
+
+		callback.mockClear();
+		// Unrelated: writes on other entities never wake the observer.
+		client.add(2, 'name', 'Bob');
+		client.add(2, 'age', 30);
+		expect(callback).not.toHaveBeenCalled();
+		// Unrelated: a no-op re-add of the same value is diffed away.
+		client.add(1, 'name', 'Alice');
+		expect(callback).not.toHaveBeenCalled();
+
+		// Relevant: the observed entity's value changes.
+		client.add(1, 'name', 'Alicia');
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith({ id: 1, name: 'Alicia' });
+
+		unsubscribe();
+		client.add(1, 'name', 'Alicia-2');
+		expect(callback).toHaveBeenCalledTimes(1);
+	});
+
+	it('observeEntity() also fires when a brand-new attribute is added to the entity', () => {
+		const client = createClient();
+		const callback = vi.fn();
+		client.add(1, 'name', 'Alice');
+		client.observeEntity(1, callback);
+		callback.mockClear();
+
+		// A new attribute is part of the entity payload — it must wake the observer.
+		client.add(1, 'age', 30);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenLastCalledWith({ id: 1, name: 'Alice', age: 30 });
+	});
+});

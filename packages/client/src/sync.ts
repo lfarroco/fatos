@@ -9,14 +9,18 @@
  * → { type: 'sync', id, afterTx? }
  * ← { type: 'synced', id }
  * ← { type: 'facts', id, facts }            // catch-up: facts with tx > afterTx (may span multiple frames)
+ * ← { type: 'snapshot', id, facts, transactions } // full pull (no afterTx): current-state facts + full ledger
+
  * ← { type: 'transactions', id, transactions } // catch-up: ledger with tx > afterTx
  * ← { type: 'sync-event', id, event }       // live: transaction:committed
  * ```
  *
  * Strategies (see docs/sync-strategies.md):
  * - **Full snapshot pull** — first connect (empty local client): the server
- *   streams the whole fact log + ledger and the local client is rebuilt with
- *   `db.restore()`, which replays schema facts verbatim.
+ *   streams a compact state snapshot - only the facts still asserted in the
+ *   current state, not the whole history - plus the full ledger, and the
+ *   local client is rebuilt with `db.restore()`, which replays schema facts
+ *   verbatim. The full-log chunked pull remains the fallback.
  * - **afterTx incremental catch-up** — reconnect: `afterTx` is the last
  *   applied server tx; only the delta is streamed and replayed per
  *   transaction via `client.transact()`. Schema facts in the delta are
@@ -68,6 +72,17 @@ export type SyncServerMessage =
 	| { type: 'synced'; id: string }
 	| { type: 'facts'; id: string; facts: readonly Fact[] }
 	| { type: 'transactions'; id: string; transactions: readonly TransactionRecord[] }
+	| {
+		/**
+		 * Fresh-pull (no afterTx) frame (B4.1): `facts` is the minimal
+		 * current-state fact set (wire-tagged), `transactions` the full
+		 * ledger — the client's watermark is the ledger's head.
+		 */
+		type: 'snapshot';
+		id: string;
+		facts: readonly Fact[];
+		transactions: readonly TransactionRecord[];
+	}
 	| { type: 'sync-event'; id: string; event: SyncTransactionEvent };
 
 export type FactLog = {
@@ -191,6 +206,16 @@ export function parseSyncMessage(text: string): SyncServerMessage | null {
 				return { type: 'transactions', id, transactions: parsed['transactions'] };
 			}
 			return null;
+		case 'snapshot':
+			if (
+				Array.isArray(parsed['facts'])
+				&& parsed['facts'].every(isFactTuple)
+				&& Array.isArray(parsed['transactions'])
+				&& parsed['transactions'].every(isTransactionTuple)
+			) {
+				return { type: 'snapshot', id, facts: parsed['facts'], transactions: parsed['transactions'] };
+			}
+			return null;
 		case 'sync-event':
 			if (isSyncTransactionEvent(parsed['event'])) {
 				return { type: 'sync-event', id, event: parsed['event'] };
@@ -302,6 +327,23 @@ function transactionMetadata(log: FactLog, tx: number): Record<string, unknown> 
 }
 
 /**
+ * Revives wire-tagged transaction metadata (`{ $date }` / `{ $bigint }` /
+ * `{ $ref }`) back into engine values before it is stored or passed to
+ * `transact`. Plain JSON metadata passes through unchanged.
+ */
+function deserializeMetadata(metadata: Record<string, unknown> | null): Record<string, unknown> | null {
+	if (metadata === null) {
+		return null;
+	}
+
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(metadata)) {
+		result[key] = deserializeValue(value);
+	}
+	return result;
+}
+
+/**
  * Replays a catch-up delta onto `client`, one server transaction at a time
  * (ascending), advancing `lastApplied` per success. A failed transaction stops
  * the replay and reports `error`; because `transact()` is atomic per
@@ -313,7 +355,11 @@ export function applyDeltaToClient(client: FatosClient, delta: FactLog): ApplyDe
 		const txFacts = delta.facts.filter((fact) => fact[3] === tx);
 		try {
 			if (txFacts.length > 0) {
-				client.transact(factsToTransactionEntries(txFacts), transactionMetadata(delta, tx));
+				const metadata = transactionMetadata(delta, tx);
+				client.transact(
+					factsToTransactionEntries(txFacts),
+					metadata === undefined ? undefined : (deserializeMetadata(metadata) ?? undefined)
+				);
 			}
 			lastApplied = tx;
 		} catch (error) {
@@ -476,6 +522,9 @@ export class SyncingClient {
 			case 'transactions':
 				this.applyCatchUp(this.pendingFacts, message.transactions);
 				break;
+			case 'snapshot':
+				this.applySnapshot(message);
+				break;
 			case 'sync-event':
 				this.applyLiveTransaction(message.event);
 				break;
@@ -497,6 +546,32 @@ export class SyncingClient {
 			this.reconnectTimer = null;
 			this.connect();
 		}, delay);
+	}
+
+	/**
+	 * Applies a fresh-pull snapshot frame (B4.1): the minimal current-state
+	 * fact set plus the full ledger. The client is rebuilt via `restore()`,
+	 * the only replay path that preserves schema facts verbatim (negative
+	 * schema eids are never remapped). `restore()` demands the fact tx-set and
+	 * ledger tx-set match exactly, so the ledger is trimmed to the txs the
+	 * snapshot facts reference; the watermark is still the full ledger's head
+	 * (the server's true tx) so a reconnect catches up from the real frontier.
+	 */
+	private applySnapshot(snapshot: { facts: readonly Fact[]; transactions: readonly TransactionRecord[] }): void {
+		const deserialized = snapshot.facts.map(
+			(fact) => [fact[0], fact[1], deserializeValue(fact[2]), fact[3], fact[4]] as Fact
+		);
+
+		const factTxs = new Set<number>();
+		for (const fact of deserialized) {
+			factTxs.add(fact[3]);
+		}
+		const transactions = snapshot.transactions.filter(([tx]) => factTxs.has(tx));
+
+		this.rebuildClient({ facts: deserialized, transactions });
+
+		const ledger = snapshot.transactions;
+		this.lastAppliedTxInternal = ledger.length === 0 ? null : ledger[ledger.length - 1][0];
 	}
 
 	private applyCatchUp(facts: readonly Fact[], transactions: readonly TransactionRecord[]): void {
@@ -541,7 +616,10 @@ export class SyncingClient {
 				(fact) => [fact[0], fact[1], deserializeValue(fact[2]), fact[3], fact[4]] as Fact
 			);
 			if (facts.length > 0) {
-				this.clientInternal.transact(factsToTransactionEntries(facts), event.transaction[2] ?? undefined);
+				this.clientInternal.transact(
+					factsToTransactionEntries(facts),
+					deserializeMetadata(event.transaction[2]) ?? undefined
+				);
 			}
 			this.lastAppliedTxInternal = tx;
 		} catch (error) {
@@ -562,7 +640,14 @@ export class SyncingClient {
 	 */
 	private rebuildClient(log: FactLog): void {
 		const db = createDatabase();
-		db.restore(log);
+		// Wire metadata arrives tagged ($date/$bigint/$ref); restore stores
+		// transaction records verbatim, so revive it first to keep the local
+		// ledger holding engine values like the server's.
+		const transactions = log.transactions.map(
+			([tx, timestamp, metadata]) =>
+				[tx, timestamp, metadata === null ? null : deserializeMetadata(metadata)] as TransactionRecord
+		);
+		db.restore({ facts: log.facts, transactions });
 		const next = new FatosClient(db);
 		this.clientInternal = next;
 		this.lastAppliedTxInternal = maxTxOf(log);

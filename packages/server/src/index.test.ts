@@ -4,10 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import WebSocket from 'ws';
+import { get as httpGet } from 'node:http';
 import { createFatosServer, version } from './index';
 import type { StorageAdapter } from '@fatos/persistence';
 import { MemoryAdapter } from '@fatos/persistence';
-import { deserializeValue, isRef, ref, REF_BRAND } from '@fatos/core';
+import { createDatabase, deserializeValue, isRef, ref, REF_BRAND, type Fact } from '@fatos/core';
 
 /** Polls `messages` until `predicate` matches one of them or the timeout hits. */
 function waitForMessage(
@@ -128,6 +129,42 @@ describe('@fatos/server', () => {
 		}
 	});
 
+	it('wire-tags Date/bigint/ref values on the REST entity + transactions endpoints (B4.3)', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			server.transact(
+				[
+					['add', 1, 'born', new Date(1_700_000_000_000)],
+					['add', 1, 'count', 10n],
+					['add', 1, 'friend', ref(2)]
+				],
+				{ when: new Date(1_600_000_000_000) }
+			);
+
+			const entityResponse = await fetch(`${baseUrl}/facts/1`);
+			expect(entityResponse.status).toBe(200);
+			const entityBody = (await entityResponse.json()) as { entity: Record<string, unknown> };
+			expect(entityBody.entity).toEqual({
+				id: 1,
+				born: { $date: 1_700_000_000_000 },
+				count: { $bigint: '10' },
+				friend: { $ref: 2 }
+			});
+
+			const txResponse = await fetch(`${baseUrl}/transactions`);
+			const txBody = (await txResponse.json()) as {
+				transactions: [number, number, Record<string, unknown> | null][];
+			};
+			expect(txBody.transactions).toHaveLength(1);
+			expect(txBody.transactions[0][2]).toEqual({ when: { $date: 1_600_000_000_000 } });
+		} finally {
+			await server.stop();
+		}
+	});
+
 	it('supports tx-limited entity snapshots over HTTP', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });
@@ -240,6 +277,80 @@ describe('@fatos/server', () => {
 			expect(receivedTypes).toContain('transaction:committed');
 		} finally {
 			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('keeps the raw fan-out for bare clients and skips subscribed ones', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		const a = await connectSocket(wsUrl);
+		const b = await connectSocket(wsUrl);
+		const c = await connectSocket(wsUrl);
+		const adminSpec = { find: ['?e'], where: [['?e', 'type', 'admin']] };
+		const rawCommitted = (tx: number) => (message: unknown): boolean => {
+			const msg = message as { type?: string; transaction?: [number] };
+			return msg.type === 'transaction:committed' && msg.transaction?.[0] === tx;
+		};
+		const isRawEventType = (message: unknown): boolean => {
+			const msg = message as { type?: string };
+			return msg.type === 'fact:added' || msg.type === 'fact:retracted' || msg.type === 'transaction:committed';
+		};
+
+		try {
+			// A subscribes (spec-filtered `facts` frames); C is a sync client
+			// (`snapshot` + `sync-event` frames); B stays bare — the audit /
+			// DevTools stream that receives the raw fan-out (design/03).
+			a.socket.send(JSON.stringify({ type: 'subscribe', id: 'a-sub', spec: adminSpec }));
+			await waitForMessage(a.messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'subscribed' && msg.id === 'a-sub';
+			});
+			c.socket.send(JSON.stringify({ type: 'sync', id: 'c-sync' }));
+			await waitForMessage(c.messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'synced' && msg.id === 'c-sync';
+			});
+
+			server.transact([['add', 1, 'type', 'admin']]);
+
+			// B (bare) receives the raw frame; A and C do NOT — they get their
+			// own tailored frames and are excluded from the redundant raw
+			// broadcast.
+			await waitForMessage(b.messages, rawCommitted(1));
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(a.messages.filter(isRawEventType)).toEqual([]);
+			expect(c.messages.filter(isRawEventType)).toEqual([]);
+
+			// A still receives its spec-filtered facts frame; C its snapshot +
+			// live sync-events.
+			expect(
+				a.messages.some((message) => {
+					const msg = message as { type?: string; id?: string };
+					return msg.type === 'facts' && msg.id === 'a-sub';
+				})
+			).toBe(true);
+			expect(
+				c.messages.some((message) => {
+					const msg = message as { type?: string; id?: string };
+					return msg.type === 'snapshot' && msg.id === 'c-sync';
+				})
+			).toBe(true);
+
+			// After A unsubscribes its only subscription it becomes a bare
+			// audit-stream client, so the next commit's raw frame reaches it.
+			a.socket.send(JSON.stringify({ type: 'unsubscribe', id: 'a-sub' }));
+			await new Promise((resolve) => setTimeout(resolve, 200));
+
+			server.transact([['add', 2, 'type', 'admin']]);
+			await waitForMessage(b.messages, rawCommitted(2));
+			await waitForMessage(a.messages, rawCommitted(2));
+		} finally {
+			a.socket.close();
+			b.socket.close();
+			c.socket.close();
 			await server.stop();
 		}
 	});
@@ -363,6 +474,172 @@ describe('@fatos/server', () => {
 		}
 	});
 
+	it('tags transaction metadata in sync frames (catch-up and live)', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		// Seed the tagged transaction first, then pull it through the
+		// afterTx catch-up path (afterTx: 0 keeps the chunked frames).
+		server.transact([['add', 1, 'user/name', 'Alice']], { when: new Date(1_700_000_000_000), n: 10n });
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		try {
+			socket.send(JSON.stringify({ type: 'sync', id: 'tagged-sync', afterTx: 0 }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'synced' && msg.id === 'tagged-sync';
+			});
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string; transactions?: unknown[] };
+				return msg.type === 'transactions' && msg.id === 'tagged-sync' && msg.transactions?.length === 1;
+			});
+			const txFrame = messages.find((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'transactions' && msg.id === 'tagged-sync';
+			}) as { transactions: [number, number, Record<string, unknown>][] };
+			expect(txFrame.transactions[0]?.[2]).toEqual({
+				when: { $date: 1_700_000_000_000 },
+				n: { $bigint: '10' }
+			});
+
+			// A live sync-event's metadata is tagged as well.
+			server.transact([['add', 2, 'user/name', 'Bob']], { source: 'live' });
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string; event?: { transaction?: [number] } };
+				return msg.type === 'sync-event' && msg.id === 'tagged-sync' && msg.event?.transaction?.[0] === 2;
+			});
+			const syncEvent = messages.find((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'sync-event' && msg.id === 'tagged-sync';
+			}) as { event: { transaction: [number, number, Record<string, unknown>]; facts: unknown[][] } };
+			expect(syncEvent.event.transaction[2]).toEqual({ source: 'live' });
+			expect(syncEvent.event.facts).toEqual([[2, 'user/name', 'Bob', 2, 'add']]);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('streams wire-tagged values over the SSE event stream', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+
+		let connectedResolve: (() => void) | undefined;
+		const connected = new Promise<void>((resolve) => {
+			connectedResolve = resolve;
+		});
+		let receivedResolve: ((body: string) => void) | undefined;
+		const received = new Promise<string>((resolve) => {
+			receivedResolve = resolve;
+		});
+
+		const request = httpGet({ host: '127.0.0.1', port, path: '/events' }, (response) => {
+			response.setEncoding('utf8');
+			let buffer = '';
+			response.on('data', (chunk: string) => {
+				buffer += chunk;
+				if (buffer.includes('event: ready')) {
+					// The SSE subscription is registered; commit now so the
+					// streamed events are not missed.
+					connectedResolve?.();
+				}
+				if (
+					buffer.includes('event: transaction:committed')
+					&& buffer.includes('$date')
+					&& buffer.includes('$bigint')
+					&& buffer.includes('$ref')
+				) {
+					receivedResolve?.(buffer);
+				}
+			});
+		});
+		request.on('error', () => {
+			connectedResolve?.();
+			receivedResolve?.('');
+		});
+
+		try {
+			await connected;
+			server.transact([
+				['add', 1, 'user/born', new Date(1_700_000_000_000)],
+				['add', 1, 'user/serial', 9_007_199_254_740_993n],
+				['add', 1, 'user/manager', ref(2)]
+			]);
+
+			const body = await received;
+			expect(body).toContain('event: fact:added');
+			expect(body).toContain('event: transaction:committed');
+			expect(body).toContain('"$date":1700000000000');
+			expect(body).toContain('"$bigint":"9007199254740993"');
+			expect(body).toContain('"$ref":2');
+		} finally {
+			request.destroy();
+			await server.stop();
+		}
+	});
+
+	it('serializes the raw WS fan-out with wire tags (Date/bigint/ref values and metadata)', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		const { socket, messages } = await connectSocket(wsUrl);
+
+		try {
+			server.transact(
+				[
+					['add', 1, 'user/born', new Date(1_700_000_000_000)],
+					['add', 1, 'user/serial', 9_007_199_254_740_993n],
+					['add', 1, 'user/manager', ref(2)]
+				],
+				{ when: new Date(1_700_000_000_000), n: 10n }
+			);
+
+			// A bare connection is the audit/DevTools stream: the raw
+			// transaction:committed frame carries tagged facts and tagged
+			// metadata — nothing throws, everything round-trips.
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; transaction?: [number] };
+				return msg.type === 'transaction:committed' && msg.transaction?.[0] === 1;
+			});
+			const committed = messages.find((message) => {
+				const msg = message as { type?: string; transaction?: [number] };
+				return msg.type === 'transaction:committed' && msg.transaction?.[0] === 1;
+			}) as {
+				transaction: [number, number, Record<string, unknown>];
+				facts: unknown[][];
+			};
+			expect(committed.transaction[2]).toEqual({
+				when: { $date: 1_700_000_000_000 },
+				n: { $bigint: '10' }
+			});
+			expect(committed.facts.map((fact) => fact[2])).toEqual([
+				{ $date: 1_700_000_000_000 },
+				{ $bigint: '9007199254740993' },
+				{ $ref: 2 }
+			]);
+
+			// Per-fact frames are tagged too.
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; fact?: [unknown] };
+				return msg.type === 'fact:added' && msg.fact?.[0] === 1;
+			});
+			const factFrames = messages.filter((message) => {
+				const msg = message as { type?: string; fact?: [unknown] };
+				return msg.type === 'fact:added' && msg.fact?.[0] === 1;
+			}) as Array<{ fact: [unknown, unknown, unknown] }>;
+			expect(factFrames.map((frame) => frame.fact[2])).toEqual([
+				{ $date: 1_700_000_000_000 },
+				{ $bigint: '9007199254740993' },
+				{ $ref: 2 }
+			]);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
 	it('supports WS subscribe/unsubscribe with live facts pushes', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });
@@ -432,10 +709,16 @@ describe('@fatos/server', () => {
 				['add', 11, 'name', 'Bob']
 			]);
 
-			// The raw fan-out still delivers the facts for eid 11 ...
+			// The live 'admins2' subscription matches the new admin — proving
+			// the commit happened and the server still pushes for active
+			// subscriptions ...
 			await waitForMessage(messages, (message) => {
-				const msg = message as { type?: string; fact?: [unknown, unknown, unknown] };
-				return msg.type === 'fact:added' && msg.fact?.[0] === 11;
+				const msg = message as { type?: string; id?: string; rows?: unknown[][] };
+				return (
+					msg.type === 'facts' &&
+					msg.id === 'admins2' &&
+					msg.rows?.some((row) => row[0] === 11) === true
+				);
 			});
 
 			// ... but no 'facts' push for the unsubscribed id arrives.
@@ -694,6 +977,74 @@ describe('@fatos/server', () => {
 		}
 	});
 
+	it('streams a compact state snapshot to a fresh sync, bounded by active state', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+		const baseUrl = `http://${host}:${port}`;
+
+		// History: one schema declaration (3 facts), then 100 churn
+		// transactions leaving a single surviving name fact, then a tagged
+		// value — 203 facts total, only 5 still asserted.
+		server.transact([{ ident: 'user/name', valueType: 'string', cardinality: 'one' }]);
+		server.transact([['add', 1, 'user/name', 'user-0']]);
+		for (let i = 1; i < 100; i += 1) {
+			server.transact([
+				['retract', 1, 'user/name', `user-${i - 1}`],
+				['add', 1, 'user/name', `user-${i}`]
+			]);
+		}
+		server.transact([['add', 2, 'user/born', new Date(1_700_000_000_000)]]);
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		try {
+			socket.send(JSON.stringify({ type: 'sync', id: 'fresh' }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'snapshot' && msg.id === 'fresh';
+			});
+
+			const frame = messages.find((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'snapshot' && msg.id === 'fresh';
+			}) as { facts: unknown[][]; transactions: unknown[][] };
+
+			// Bounded by active state: 5 current facts vs. the 203-fact log.
+			expect(frame.facts).toHaveLength(5);
+			expect(frame.transactions).toHaveLength(102);
+			const allFacts = (await (await fetch(`${baseUrl}/facts`)).json()) as { facts: unknown[] };
+			expect(allFacts.facts).toHaveLength(203);
+
+			// The surviving name fact keeps its original tx; the value is wire-tagged.
+			const nameFact = frame.facts.find((fact) => fact[1] === 'user/name');
+			expect(nameFact).toEqual([1, 'user/name', 'user-99', 101, 'add']);
+			const bornFact = frame.facts.find((fact) => fact[1] === 'user/born');
+			expect(bornFact).toEqual([2, 'user/born', { $date: 1_700_000_000_000 }, 102, 'add']);
+
+			// Applying the snapshot reproduces the server's current state and
+			// the schema survives verbatim (the client's restore path).
+			const db = createDatabase();
+			const deserialized = frame.facts.map(
+				(fact) => [fact[0], fact[1], deserializeValue(fact[2]), fact[3], fact[4]] as Fact
+			);
+			const factTxs = new Set(deserialized.map((fact) => fact[3]));
+			const trimmed = frame.transactions.filter((transaction) =>
+				factTxs.has(transaction[0] as number)
+			) as Array<[number, number, Record<string, unknown> | null]>;
+			db.restore({ facts: deserialized, transactions: trimmed });
+
+			const entityBody = (await (await fetch(`${baseUrl}/facts/1`)).json()) as { entity: unknown };
+			expect(db.entity(1)).toEqual(entityBody.entity);
+			expect(db.entity(2)).toEqual({ id: 2, 'user/born': new Date(1_700_000_000_000) });
+			expect(db.getSchemas().map((schema) => schema.ident)).toEqual(['user/name']);
+			// The restored schema constraint is live.
+			expect(() => db.transact([['add', 1, 'user/name', 'user-100']])).toThrow(/Cardinality conflict/);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
 	it('streams full-log catch-up in bounded facts chunks', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });
@@ -708,7 +1059,10 @@ describe('@fatos/server', () => {
 
 		const { socket, messages } = await connectSocket(wsUrl);
 		try {
-			socket.send(JSON.stringify({ type: 'sync', id: 'sync-chunked' }));
+			// afterTx: 0 exercises the incremental catch-up path — fresh pulls
+			// (no afterTx) now take the compact state snapshot instead, so the
+			// chunked full-log framing is covered through the afterTx path.
+			socket.send(JSON.stringify({ type: 'sync', id: 'sync-chunked', afterTx: 0 }));
 
 			// The chunked catch-up is fully sent in one synchronous tick, so
 			// waiting for the trailing 'transactions' frame is enough.
@@ -736,7 +1090,7 @@ describe('@fatos/server', () => {
 		}
 	});
 
-	it('syncs the full log when afterTx is omitted and ignores unknown ids on unsubscribe', async () => {
+	it('streams a state snapshot when afterTx is omitted and ignores unknown ids on unsubscribe', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });
 		const wsUrl = `ws://${host}:${port}/ws`;
@@ -750,9 +1104,10 @@ describe('@fatos/server', () => {
 				const msg = message as { type?: string; id?: string };
 				return msg.type === 'synced' && msg.id === 'full';
 			});
+			// A fresh sync (no afterTx) receives the compact state snapshot.
 			await waitForMessage(messages, (message) => {
 				const msg = message as { type?: string; facts?: unknown[] };
-				return msg.type === 'facts' && msg.facts?.length === 1;
+				return msg.type === 'snapshot' && msg.facts?.length === 1;
 			});
 
 			// Unsubscribing a sync id stops live sync-events.
