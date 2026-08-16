@@ -38,7 +38,7 @@ git clone <repo>
 cd fatos
 npm install
 npm run build
-npm run test
+npx vitest run   # one-shot test pass (npm run test starts vitest in watch mode)
 ```
 
 ### Development
@@ -50,7 +50,7 @@ npm run dev
 # Build all packages
 npm run build
 
-# Run tests
+# Run tests in watch mode (use `npx vitest run` for a one-shot pass)
 npm run test
 
 # Lint and type check
