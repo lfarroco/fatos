@@ -597,6 +597,48 @@ describe('@fatos/server', () => {
 		}
 	});
 
+	it('persists via append() when the adapter supports it and checkpoints a snapshot on stop', async () => {
+		const calls: Array<{ kind: 'append' | 'save'; tx: number; factCount: number }> = [];
+		const storage: StorageAdapter = {
+			async load() {
+				return { facts: [], transactions: [] };
+			},
+			async save(snapshot) {
+				calls.push({
+					kind: 'save',
+					tx: snapshot.transactions.at(-1)?.[0] ?? 0,
+					factCount: snapshot.facts.length
+				});
+			},
+			async append(transaction, facts) {
+				calls.push({ kind: 'append', tx: transaction[0], factCount: facts.length });
+			},
+			async close() {}
+		};
+
+		const server = createFatosServer({ storage });
+		await server.start({ port: 0 });
+		try {
+			server.transact([
+				['add', 1, 'type', 'user'],
+				['add', 1, 'name', 'Alice']
+			]);
+			await server.flush();
+
+			// Steady-state writes go through the O(transaction) append path —
+			// the full fact log is never re-serialized per commit.
+			expect(calls).toEqual([{ kind: 'append', tx: 1, factCount: 2 }]);
+		} finally {
+			await server.stop();
+		}
+
+		// stop() compacts: the append log is merged into one full snapshot save.
+		expect(calls).toEqual([
+			{ kind: 'append', tx: 1, factCount: 2 },
+			{ kind: 'save', tx: 1, factCount: 2 }
+		]);
+	});
+
 	it('streams full fact logs with afterTx catch-up and live sync-events', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });
@@ -646,6 +688,48 @@ describe('@fatos/server', () => {
 			const factsFrame = messages.find(withId('facts')) as { facts: unknown[][] } | undefined;
 			expect(factsFrame).toBeDefined();
 			expect(isRef(deserializeValue(factsFrame?.facts[0]?.[2]))).toBe(true);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('streams full-log catch-up in bounded facts chunks', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		// One transaction with enough facts to span multiple chunks (2500 > 2000).
+		const entries: Array<['add', number, string, number]> = [];
+		for (let i = 0; i < 2500; i += 1) {
+			entries.push(['add', i, 'n', i]);
+		}
+		server.transact(entries);
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		try {
+			socket.send(JSON.stringify({ type: 'sync', id: 'sync-chunked' }));
+
+			// The chunked catch-up is fully sent in one synchronous tick, so
+			// waiting for the trailing 'transactions' frame is enough.
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'transactions' && msg.id === 'sync-chunked';
+			});
+
+			const factsFrames = messages.filter((message) => {
+				const msg = message as { type?: string; id?: string; facts?: unknown[] };
+				return msg.type === 'facts' && msg.id === 'sync-chunked' && Array.isArray(msg.facts);
+			}) as Array<{ facts: unknown[][] }>;
+
+			expect(factsFrames.length).toBeGreaterThan(1);
+			const allFacts = factsFrames.flatMap((frame) => frame.facts);
+			expect(allFacts).toHaveLength(2500);
+			expect(allFacts[0]).toEqual([0, 'n', 0, 1, 'add']);
+			expect(allFacts[2499]).toEqual([2499, 'n', 2499, 1, 'add']);
+			// Chunks stay ordered by tx: concatenating them must be ascending.
+			const txs = allFacts.map((fact) => (fact as [unknown, unknown, unknown, number])[3]);
+			expect(txs).toEqual([...txs].sort((left, right) => left - right));
 		} finally {
 			socket.close();
 			await server.stop();

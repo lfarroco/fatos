@@ -7,13 +7,17 @@
  * and ref values keep their exact identity. `load()` returns fresh arrays
  * (the fact/transaction tuples themselves are shared — the engine treats them
  * as immutable).
+ *
+ * `append()` records a committed transaction in memory the same way `save()`
+ * does, so the adapter instance stays the source of truth between saves.
  */
 
+import type { Fact, TransactionRecord } from '@fatos/core';
 import type { DatabaseSnapshot, StorageAdapter } from '../types';
 
 export class MemoryAdapter implements StorageAdapter {
-	private facts: DatabaseSnapshot['facts'] = [];
-	private transactions: DatabaseSnapshot['transactions'] = [];
+	private facts: Fact[] = [];
+	private transactions: TransactionRecord[] = [];
 
 	load(): Promise<DatabaseSnapshot> {
 		return Promise.resolve({ facts: this.facts.slice(), transactions: this.transactions.slice() });
@@ -22,6 +26,14 @@ export class MemoryAdapter implements StorageAdapter {
 	save(snapshot: DatabaseSnapshot): Promise<void> {
 		this.facts = snapshot.facts.slice();
 		this.transactions = snapshot.transactions.slice();
+		return Promise.resolve();
+	}
+
+	append(transaction: TransactionRecord, facts: readonly Fact[]): Promise<void> {
+		this.transactions.push(transaction);
+		for (const fact of facts) {
+			this.facts.push(fact);
+		}
 		return Promise.resolve();
 	}
 

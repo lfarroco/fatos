@@ -440,6 +440,21 @@ packages/
 - [x] Integrate file import/export UI in DevTools panel
 - [x] Add round-trip import/export + adapter test fixtures
 
+### Performance hardening (server)
+
+Tracked in [docs/performance-bottlenecks.md](docs/performance-bottlenecks.md). The
+bottleneck list lives there; this checklist mirrors completion status:
+
+- [x] B1 — Append-only persistence: `StorageAdapter.append()` fast path (FileAdapter
+      JSONL log + compaction checkpoint, MemoryAdapter), server uses append and
+      checkpoints on stop; Postgres/Mongo/IndexedDB keep the snapshot fallback
+- [x] B2 — Chunked WebSocket catch-up: full-log pulls stream bounded `facts` frames;
+      the syncing client accumulates frames
+- [x] B3 — WebSocket broadcast serialized once per event (not once per client)
+- [ ] B4 — Deferred: state-snapshot sync for fresh clients, append modes for
+      Postgres/Mongo/IndexedDB, serialized raw WS event fan-out, fine-grained client
+      reactivity, per-subscription broadcast filtering
+
 ## Non-Goals (initial version)
 
 These features are not priorities for the initial release but may be explored in future versions:

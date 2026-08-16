@@ -1,6 +1,8 @@
 /**
- * FileAdapter tests — atomic JSON file round-trip, empty-file semantics, and
- * validation errors on malformed content.
+ * FileAdapter tests — atomic JSON file round-trip, empty-file semantics,
+ * validation errors on malformed content, and append-only log recovery
+ * (replay, snapshot+log merge, compaction truncation, partial trailing line,
+ * and tx <= snapshot-max skip).
  */
 
 import { promises as fs } from 'node:fs';
@@ -113,5 +115,99 @@ describe('FileAdapter', () => {
 		await adapter.save(makeRichSnapshot());
 
 		await expect(fs.access(nested)).resolves.toBeUndefined();
+	});
+
+	it('replays append-only writes through load()', async () => {
+		const filePath = await makeTempFile();
+		const adapter = new FileAdapter(filePath);
+
+		await adapter.append([1, 1, null], [[1, 'type', 'user', 1, 'add']]);
+		await adapter.append([2, 2, null], [[1, 'age', 30, 2, 'add']]);
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([
+			[1, 1, null],
+			[2, 2, null]
+		]);
+		expect(loaded.facts).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[1, 'age', 30, 2, 'add']
+		]);
+	});
+
+	it('merges the snapshot with newer log entries, in order, without duplication', async () => {
+		const filePath = await makeTempFile();
+		const adapter = new FileAdapter(filePath);
+		const snapshot = makeRichSnapshot();
+
+		await adapter.save(snapshot);
+		await adapter.append([4, 4, null], [[3, 'user/name', 'Carol', 4, 'add']]);
+
+		const loaded = await adapter.load();
+		expect(comparableFacts(loaded.facts)).toEqual([...comparableFacts(snapshot.facts), [3, 'user/name', 'Carol', 4, 'add']]);
+		expect(loaded.transactions).toEqual([...snapshot.transactions, [4, 4, null]]);
+	});
+
+	it('checkpoint truncates the append log after save()', async () => {
+		const filePath = await makeTempFile();
+		const adapter = new FileAdapter(filePath);
+
+		await adapter.append([1, 1, null], [[1, 'type', 'user', 1, 'add']]);
+		await adapter.append([2, 2, null], [[1, 'age', 30, 2, 'add']]);
+
+		const logPath = `${filePath}.log`;
+		await expect(fs.access(logPath)).resolves.toBeUndefined();
+
+		await adapter.save({
+			facts: [
+				[1, 'type', 'user', 1, 'add'],
+				[1, 'age', 30, 2, 'add']
+			],
+			transactions: [
+				[1, 1, null],
+				[2, 2, null]
+			]
+		});
+
+		const entries = await fs.readdir(join(filePath, '..'));
+		expect(entries.filter((entry) => entry.endsWith('.log'))).toEqual([]);
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([
+			[1, 1, null],
+			[2, 2, null]
+		]);
+		expect(loaded.facts).toEqual([
+			[1, 'type', 'user', 1, 'add'],
+			[1, 'age', 30, 2, 'add']
+		]);
+	});
+
+	it('tolerates a partial trailing log line from a crash mid-append', async () => {
+		const filePath = await makeTempFile();
+		const adapter = new FileAdapter(filePath);
+
+		await adapter.append([1, 1, null], [[1, 'type', 'user', 1, 'add']]);
+		await fs.appendFile(`${filePath}.log`, '{"version":1,"transaction":', 'utf8');
+
+		const loaded = await adapter.load();
+		expect(loaded.transactions).toEqual([[1, 1, null]]);
+		expect(loaded.facts).toEqual([[1, 'type', 'user', 1, 'add']]);
+	});
+
+	it('skips log entries whose tx is already inside the snapshot', async () => {
+		const filePath = await makeTempFile();
+		const adapter = new FileAdapter(filePath);
+		const snapshot = makeRichSnapshot();
+
+		await adapter.save(snapshot);
+		// Re-append the last snapshot transaction: it was already checkpointed
+		// (crash between checkpoint and log truncate must not double-replay).
+		const lastTx = snapshot.transactions[snapshot.transactions.length - 1];
+		await adapter.append(lastTx, snapshot.facts.filter((fact) => fact[3] === lastTx[0]));
+
+		const loaded = await adapter.load();
+		expect(comparableFacts(loaded.facts)).toEqual(comparableFacts(snapshot.facts));
+		expect(loaded.transactions).toEqual(snapshot.transactions);
 	});
 });

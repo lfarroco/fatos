@@ -477,3 +477,110 @@ describe('createSyncingClient (fake socket)', () => {
 	});
 });
 
+describe('chunked catch-up', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('accumulates a full pull split across two facts frames', () => {
+		const harness = socketHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+		socket.message(json(synced(syncing.id)));
+
+		// Facts spanning tx 1..3 arrive in two 'facts' frames, then the ledger.
+		socket.message(
+			json({
+				type: 'facts',
+				id: syncing.id,
+				facts: [
+					[1, 'user/name', 'Alice', 1, 'add'],
+					[1, 'user/age', 30, 2, 'add']
+				]
+			})
+		);
+		socket.message(json({ type: 'facts', id: syncing.id, facts: [[2, 'type', 'admin', 3, 'add']] }));
+		socket.message(
+			json({
+				type: 'transactions',
+				id: syncing.id,
+				transactions: [
+					[1, 1000, null],
+					[2, 2000, null],
+					[3, 3000, null]
+				]
+			})
+		);
+
+		expect(syncing.client.getFacts()).toEqual([
+			[1, 'user/name', 'Alice', 1, 'add'],
+			[1, 'user/age', 30, 2, 'add'],
+			[2, 'type', 'admin', 3, 'add']
+		]);
+		expect(syncing.getLastAppliedTx()).toBe(3);
+		syncing.stop();
+	});
+
+	it('accumulates a reconnect incremental catch-up split across two facts frames', () => {
+		vi.useFakeTimers();
+		const harness = socketHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			reconnectDelayMs: 10,
+			onError: (error) => errors.push(error)
+		});
+		syncing.start();
+
+		// Initial full pull with a single-facts frame (tx 1).
+		const socket = harness.current();
+		socket.open();
+		socket.message(json(synced(syncing.id)));
+		socket.message(json({ type: 'facts', id: syncing.id, facts: [[1, 'user/name', 'Alice', 1, 'add']] }));
+		socket.message(json({ type: 'transactions', id: syncing.id, transactions: [[1, 1000, null]] }));
+		const stableClient = syncing.client;
+		expect(syncing.getLastAppliedTx()).toBe(1);
+
+		// Drop the connection: the next connect re-syncs from the watermark.
+		socket.close();
+		vi.advanceTimersByTime(10);
+		const socket2 = harness.current();
+		expect(syncing.getStatus()).toBe('reconnecting');
+		socket2.open();
+		expect(JSON.parse(socket2.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 1 });
+
+		// Chunked catch-up: tx 2 and tx 3 facts arrive in two 'facts' frames.
+		socket2.message(json(synced(syncing.id)));
+		socket2.message(json({ type: 'facts', id: syncing.id, facts: [[1, 'user/age', 30, 2, 'add']] }));
+		socket2.message(json({ type: 'facts', id: syncing.id, facts: [[1, 'user/name', 'Alicia', 3, 'add']] }));
+		socket2.message(
+			json({
+				type: 'transactions',
+				id: syncing.id,
+				transactions: [
+					[2, 2000, null],
+					[3, 3000, null]
+				]
+			})
+		);
+
+		// Incremental catch-up: same client instance, both frames merged in.
+		expect(syncing.client).toBe(stableClient);
+		expect(syncing.client.getFacts()).toEqual([
+			[1, 'user/name', 'Alice', 1, 'add'],
+			[1, 'user/age', 30, 2, 'add'],
+			[1, 'user/name', 'Alicia', 3, 'add']
+		]);
+		expect(syncing.getLastAppliedTx()).toBe(3);
+		expect(errors).toEqual([]);
+		syncing.stop();
+	});
+});
+
+

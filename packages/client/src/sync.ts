@@ -8,7 +8,7 @@
  * ```
  * → { type: 'sync', id, afterTx? }
  * ← { type: 'synced', id }
- * ← { type: 'facts', id, facts }            // catch-up: facts with tx > afterTx
+ * ← { type: 'facts', id, facts }            // catch-up: facts with tx > afterTx (may span multiple frames)
  * ← { type: 'transactions', id, transactions } // catch-up: ledger with tx > afterTx
  * ← { type: 'sync-event', id, event }       // live: transaction:committed
  * ```
@@ -469,7 +469,9 @@ export class SyncingClient {
 				this.setStatus('synced');
 				break;
 			case 'facts':
-				this.pendingFacts = message.facts;
+				// Catch-up facts may arrive as multiple frames in ascending tx
+				// order; accumulate until the 'transactions' frame applies them.
+				this.pendingFacts = [...this.pendingFacts, ...message.facts];
 				break;
 			case 'transactions':
 				this.applyCatchUp(this.pendingFacts, message.transactions);

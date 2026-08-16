@@ -29,6 +29,13 @@ import {
 
 export const version = '0.0.1';
 
+/**
+ * Catch-up facts per `facts` frame when streaming a `sync` full-log pull
+ * (design/03 + sync protocol). Bounding frame size keeps a huge full-log
+ * catch-up from materializing one oversized WebSocket frame per connection.
+ */
+const SYNC_CATCH_UP_CHUNK = 2000;
+
 export type Unsubscribe = () => void;
 
 export type ServerEvent =
@@ -258,10 +265,11 @@ export class FatosServer {
 	}
 
 	async stop(): Promise<void> {
-		// Wait for any in-flight storage save so a stopped server has a
-		// consistent snapshot on disk/backend (saves never reject — failures
+		// Wait for any in-flight storage write so a stopped server has a
+		// consistent snapshot on disk/backend (writes never reject — failures
 		// are surfaced by flush()).
 		await this.persistQueue;
+		await this.checkpoint();
 
 		if (this.websocketEventUnsubscribe) {
 			this.websocketEventUnsubscribe();
@@ -323,21 +331,22 @@ export class FatosServer {
 		}
 	}
 
-	private sendWebSocketEvent(client: WebSocket, event: ServerEvent): void {
-		if (client.readyState !== 1) {
-			return;
-		}
-
-		client.send(JSON.stringify(event));
-	}
-
 	private broadcastWebSocketEvent(event: ServerEvent): void {
 		if (!this.websocketServer) {
 			return;
 		}
 
-		for (const client of this.websocketServer.clients) {
-			this.sendWebSocketEvent(client, event);
+		const recipients = [...this.websocketServer.clients].filter((client) => client.readyState === 1);
+		if (recipients.length === 0) {
+			return;
+		}
+
+		// Serialize once and share the string: the payload is identical for
+		// every client, so per-client JSON.stringify is N× wasted work on the
+		// event loop of every committed transaction.
+		const serialized = JSON.stringify(event);
+		for (const client of recipients) {
+			client.send(serialized);
 		}
 	}
 
@@ -476,7 +485,9 @@ export class FatosServer {
 	 *
 	 *   -> { type: 'sync', id, afterTx? }
 	 *   <- { type: 'synced', id }
-	 *   <- { type: 'facts', id, facts }            // facts with tx > afterTx
+	 *   <- { type: 'facts', id, facts }            // facts with tx > afterTx;
+	 *                                            //   full pulls arrive as
+	 *                                            //   multiple chunks
 	 *   <- { type: 'transactions', id, transactions } // ledger with tx > afterTx
 	 *   <- live: { type: 'sync-event', id, event }
 	 *
@@ -522,7 +533,18 @@ export class FatosServer {
 
 		const facts = this.db.getFacts().filter((fact) => afterTx === undefined || fact[3] > afterTx);
 		const transactions = this.db.getTransactions().filter(([tx]) => afterTx === undefined || tx > afterTx);
-		this.sendWebSocket(client, { type: 'facts', id, facts: serializeFacts(facts) });
+		// Stream the catch-up in bounded tx-ordered chunks (the db fact log is
+		// append-ordered, so consecutive slices stay ascending by tx). The
+		// client accumulates `facts` frames and applies the catch-up when the
+		// trailing `transactions` frame arrives; a full-log pull never builds
+		// one oversized frame per connection.
+		for (let offset = 0; offset < facts.length; offset += SYNC_CATCH_UP_CHUNK) {
+			this.sendWebSocket(client, {
+				type: 'facts',
+				id,
+				facts: serializeFacts(facts.slice(offset, offset + SYNC_CATCH_UP_CHUNK))
+			});
+		}
 		this.sendWebSocket(client, { type: 'transactions', id, transactions });
 	}
 
@@ -576,24 +598,37 @@ export class FatosServer {
 				transaction,
 				facts
 			});
+			this.persist(transaction, facts);
 		}
-
-		this.persist();
 		return facts;
 	}
 
 	/**
-	 * Queues a snapshot save after the commit. `transact` stays synchronous
-	 * (existing API), so saves run on an ordered promise chain: each save
-	 * captures the db state right after its commit and runs strictly after the
-	 * previous save. Failures are captured and rethrown by the next `flush()`.
+	 * Queues a persistence write after the commit. `transact` stays synchronous
+	 * (existing API), so writes run on an ordered promise chain: each write
+	 * captures its commit's payload and runs strictly after the previous one.
+	 * Append-capable adapters record just the committed transaction
+	 * (O(transaction size) — no full fact-log serialization); snapshot-only
+	 * adapters fall back to saving the whole database state as of this commit.
+	 * Failures are captured and rethrown by the next `flush()`.
 	 */
-	private persist(): void {
+	private persist(transaction: TransactionRecord, facts: readonly Fact[]): void {
 		const storage = this.storage;
 		if (!storage) {
 			return;
 		}
 
+		if (typeof storage.append === 'function') {
+			this.persistQueue = this.persistQueue
+				.then(() => storage.append?.(transaction, facts))
+				.catch((error: unknown) => {
+					this.lastPersistError = error instanceof Error ? error : new Error(String(error));
+				});
+			return;
+		}
+
+		// Snapshot fallback: capture the state as of THIS commit so queued
+		// saves never bleed later commits into an earlier save.
 		const snapshot = { facts: this.db.getFacts(), transactions: this.db.getTransactions() };
 		this.persistQueue = this.persistQueue
 			.then(() => storage.save(snapshot))
@@ -613,6 +648,30 @@ export class FatosServer {
 			const error = this.lastPersistError;
 			this.lastPersistError = null;
 			throw error;
+		}
+	}
+
+	/**
+	 * Compacts an append-mode adapter on shutdown: merges the pending append
+	 * log into a full snapshot so a restart replays a bounded log (the O(n)
+	 * cost moves to one controlled point per process lifetime instead of per
+	 * transaction). Best-effort — the append log stays durable if this fails,
+	 * so the failure is recorded for `flush()` rather than thrown here.
+	 */
+	private async checkpoint(): Promise<void> {
+		const storage = this.storage;
+		if (!storage || typeof storage.append !== 'function') {
+			return;
+		}
+
+		if (this.db.getFacts().length === 0) {
+			return;
+		}
+
+		try {
+			await storage.save({ facts: this.db.getFacts(), transactions: this.db.getTransactions() });
+		} catch (error) {
+			this.lastPersistError = error instanceof Error ? error : new Error(String(error));
 		}
 	}
 
