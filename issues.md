@@ -15,6 +15,56 @@ Format:
 ```
 
 ---
+## [2026-08-17] core+client — G2: `entity()` returns `ref()` values as plain ids by default
+- **Task**: G2 (P1) — `entity()` returns `ref()` values as plain ids by default
+  (docs/niche-gap-tasks.md; design/01 "default: plain id, for ergonomics and
+  JSON compatibility")
+- **Found by**: G2 implementation (packages/core, packages/client,
+  packages/server, packages/schema-designer, packages/app-replay)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `entity()` (and `find()`, and the `at(tx)` view) returned
+  `ref()` values as symbol-branded objects, forcing every consumer to unwrap
+  (Replay's `refTarget()`, DevTools graph, the schema-designer converter).
+  Added the `refs` read option with default `'id'`: `entity(eid, tx?, {
+  refs: 'id' | 'ref' })`, `find(criteria, { refs })` (FindOptions), and the
+  `at(tx)` view (`entity(eid, options?)` / `find(criteria, { refs, tx })`).
+  Behavior decisions recorded:
+  - **`lookupRef` targets stay branded in both modes** (`ref(lookupRef(...))`
+    and bare `lookupRef(...)` are never unwrapped — resolving them needs the
+    unique-index lookup, which `pull` already does). Only `ref(number|string)`
+    unwraps to the plain id.
+  - **Cardinality-many ref attributes unwrap element-wise** (array of plain
+    ids by default, array of branded refs with `{ refs: 'ref' }`).
+  - **`pull()` is unchanged** (it already returns `{ id }` shapes and does its
+    own lookupRef resolution).
+  - **Server `GET /facts/:eid` reads with `{ refs: 'ref' }`** to preserve the
+    B4.3 wire-tag contract (`$ref` tags must survive the endpoint so clients
+    can round-trip losslessly); the plain-id default is an in-process
+    ergonomic read shape only.
+  - **Schema-designer `toSchemaDesignerDocumentFromFatosSnapshot` now resolves
+    plain-id ref values** on ref-typed attributes (the default read shape) via
+    `plainRefTargetId`, so relationship reconstruction still works when the
+    snapshot's entity data carries plain ids instead of branded refs; the
+    converter still passes entity attribute values through verbatim (per its
+    documented limitation), so `entitiesData` now surfaces plain ids.
+- **Resolution**: core: `EntityReadOptions` type, `FindOptions.refs`,
+  `unwrapRefValue` helper, `entity`/`find`/`at` option plumbing (+8 tests in
+  values.test.ts covering default plain id, `{ refs: 'ref' }`, many-valued
+  element-wise unwrap, lookupRef stays branded, at-view passthrough, pull
+  unchanged; 2 existing assertions updated in values.test.ts +
+  transact-query.test.ts — the many-valued-ref fixture now reads plain ids
+  directly). client: `entity`/`atTransaction` passthrough + `EntityReadOptions`
+  re-export (+1 test). server: entity endpoint reads `{ refs: 'ref' }`.
+  schema-designer: `plainRefTargetId` + test updated to the plain-id read
+  shape. app-replay: dropped `refTarget()` — `readBoardAt`/`deleteNode` read
+  plain ids directly (the acceptance-criteria win). Validation: core 234
+  tests green (was 228), client 54 green (was 53), app-replay 6 green, server
+  26 green, schema-designer 20 green, all other workspaces' tests green (489
+  total incl. the pre-existing e2e collection quirk), repo-wide typecheck
+  clean, lint clean on changed packages.
+
+---
 ## [2026-08-14] devtools — Phase 6 time travel UI implemented
 - **Task**: Phase 6: Time travel UI (design/04 P4 "replay a tx range against a snapshot")
 - **Found by**: Phase 6 implementation (packages/devtools, packages/chrome-extension)

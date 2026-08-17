@@ -1004,7 +1004,10 @@ export class FatosServer {
 					return;
 				}
 
-				const entity = this.db.entity(eid, tx);
+				// Keep refs branded on the wire so `$ref` tags survive the
+				// endpoint (lossless round-trip); core's plain-id default
+				// is an in-process ergonomic read shape.
+				const entity = this.db.entity(eid, tx, { refs: 'ref' });
 				writeJson(res, 200, { entity: serializeEntityState(entity) });
 				return;
 			}

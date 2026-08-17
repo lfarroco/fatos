@@ -52,6 +52,7 @@ If roadmap guidance is ambiguous, follow [PLAN.md](PLAN.md) first, then README c
 - Add or update tests with behavior changes (vitest, per package).
 - Prefer incremental, phase-aligned work over broad refactors.
 - `@fatos/core` is shared by browser and server: never add Node-only or browser-only imports there.
+- When adding comments, don't mention current issues or codes (comments should be atemporal)
 
 ## Commands
 

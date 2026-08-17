@@ -19,10 +19,8 @@
  */
 import { createClient, type FatosClient } from '@fatos/client';
 import {
-	REF_BRAND,
 	createDatabase,
 	deserializeValue,
-	isRef,
 	ref,
 	serializeValue,
 	type DiffResult,
@@ -77,18 +75,11 @@ export function headTx(db: FactDatabase): number {
 	return transactions.length === 0 ? 0 : transactions[transactions.length - 1][0];
 }
 
-/** Extracts the plain entity id from a stored `ref()` value (null when not a ref). */
-export function refTarget(value: unknown): EntityId | null {
-	if (isRef(value)) {
-		const target = value[REF_BRAND];
-		return typeof target === 'number' || typeof target === 'string' ? target : null;
-	}
-	return null;
-}
-
 /**
  * Reads the board as of a transaction. `tx === head` reads the live database;
  * anything earlier goes through `db.at(tx)` — the temporal read primitive.
+ * `ref()`-typed reads (`edge/from`, `edge/to`) come back as plain entity ids
+ * by default (design/01), so no unwrapping is needed here.
  */
 export function readBoardAt(db: FactDatabase, tx: number): { nodes: BoardNode[]; edges: BoardEdge[] } {
 	const view = tx === headTx(db) ? db : db.at(tx);
@@ -104,14 +95,18 @@ export function readBoardAt(db: FactDatabase, tx: number): { nodes: BoardNode[];
 
 	const edges: BoardEdge[] = [];
 	for (const entity of edgeEntities) {
-		const from = refTarget(entity['edge/from']);
-		const to = refTarget(entity['edge/to']);
-		if (from !== null && to !== null) {
+		const from = entity['edge/from'];
+		const to = entity['edge/to'];
+		if (isEntityId(from) && isEntityId(to)) {
 			edges.push({ id: entity.id, from, to });
 		}
 	}
 
 	return { nodes, edges };
+}
+
+function isEntityId(value: unknown): value is EntityId {
+	return typeof value === 'number' || typeof value === 'string';
 }
 
 let actionSeq = 0;
@@ -165,8 +160,8 @@ export function deleteNode(db: FactDatabase, id: EntityId): void {
 	}
 
 	for (const edge of db.find({ 'edge/from': { $exists: true } })) {
-		const from = refTarget(edge['edge/from']);
-		const to = refTarget(edge['edge/to']);
+		const from = edge['edge/from'];
+		const to = edge['edge/to'];
 		if (from !== id && to !== id) {
 			continue;
 		}

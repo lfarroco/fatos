@@ -281,12 +281,14 @@ describe('@fatos/schema-designer', () => {
 
 		const alicePostIds = alice?.attributes['postIds'] as unknown[] | undefined;
 		expect(alicePostIds).toHaveLength(1);
-		expect(serializeValue(alicePostIds?.[0])).toEqual({ $ref: 20 });
+		// ref values read back as plain ids by default; the converter
+		// passes entity attribute values through verbatim
+		expect(alicePostIds?.[0]).toBe(20);
 
 		const hello = imported.entitiesData.find((row) => row.eid === 20);
 		expect(hello).toBeDefined();
 		expect(hello?.attributes['title']).toBe('Hello fatos');
-		expect(serializeValue(hello?.attributes['authorId'])).toEqual({ $ref: 10 });
+		expect(hello?.attributes['authorId']).toBe(10);
 	});
 
 	it('adds and edits entities through editor helpers', () => {

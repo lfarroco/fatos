@@ -61,10 +61,12 @@ describe('insert — object maps', () => {
 			}
 		]);
 
-		const kid = (db.entity(pid) as { 'user/kid': unknown })['user/kid'] as { [REF_BRAND]: EntityId };
+		const kid = (db.entity(pid, undefined, { refs: 'ref' }) as { 'user/kid': unknown })['user/kid'] as {
+			[REF_BRAND]: EntityId;
+		};
 		expect(isRef(kid)).toBe(true);
 		expect(db.entity(kid[REF_BRAND])).toMatchObject({ 'user/name': 'Kid' });
-		expect(db.entity(kid[REF_BRAND])).toMatchObject({ 'user/parent': ref(pid) });
+		expect(db.entity(kid[REF_BRAND])).toMatchObject({ 'user/parent': pid });
 	});
 
 	it('expands arrays into cardinality-many facts (P1 array expansion)', () => {
@@ -127,18 +129,19 @@ describe('insert — object maps', () => {
 		]);
 
 		expect(db.getSchema('user/contact')).toMatchObject({ valueType: 'ref', cardinality: 'many' });
-		const contacts = (db.entity(id) as { 'user/contact': unknown[] })['user/contact'];
+		// ref values read back as plain ids by default
+		const contacts = (db.entity(id) as { 'user/contact': EntityId[] })['user/contact'];
 		expect(contacts).toHaveLength(2);
 
 		const pulled = db.pull(id, 'user.contact.contact.type user.contact.contact.value');
 		expect(pulled?.['user/contact']).toEqual([
 			{
-				id: (contacts[0] as { [REF_BRAND]: EntityId })[REF_BRAND],
+				id: contacts[0],
 				'contact/type': 'email',
 				'contact/value': 'a@b.c'
 			},
 			{
-				id: (contacts[1] as { [REF_BRAND]: EntityId })[REF_BRAND],
+				id: contacts[1],
 				'contact/type': 'phone',
 				'contact/value': '+49 30 000'
 			}
@@ -208,7 +211,7 @@ describe('upsert — db/unique: identity', () => {
 		db.transact([{ ident: 'user/manager', valueType: 'ref', cardinality: 'one' }]);
 
 		const bob = db.insert({ 'user/name': 'Bob', 'user/manager': lookupRef(['user/email', 'a@b.c']) });
-		expect((db.entity(bob) as { 'user/manager': unknown })['user/manager']).toEqual(ref(alice));
+		expect((db.entity(bob) as { 'user/manager': unknown })['user/manager']).toEqual(alice);
 	});
 
 	it('raises when a lookupRef value matches nothing', () => {

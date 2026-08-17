@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { isRef, ref, REF_BRAND, type Ref } from '@fatos/core';
 import {
 	createClient,
 	version,
@@ -152,6 +153,30 @@ describe('@fatos/client', () => {
 		]);
 		expect(client.find({ 'card/column': 'todo' }, { orderBy: ['card/order', 'asc'] }).map((e) => e.id)).toEqual([
 			1, 2
+		]);
+	});
+
+	it('entity/find/atTransaction surface the refs read option', () => {
+		const client = createClient();
+		client.add(1, 'friend', ref(42));
+		client.add(1, 'name', 'Alice');
+		client.add(2, 'name', 'Bob');
+		client.add(2, 'friend', ref(1));
+
+		// default: plain ids
+		expect(client.entity(2)).toEqual({ id: 2, name: 'Bob', friend: 1 });
+		expect(client.find({ friend: ref(1) })).toEqual([{ id: 2, name: 'Bob', friend: 1 }]);
+
+		// { refs: 'ref' }: branded ref values
+		const branded = client.entity(2, undefined, { refs: 'ref' }) as { id: number; friend: Ref };
+		expect(isRef(branded.friend)).toBe(true);
+		expect(branded.friend[REF_BRAND]).toBe(1);
+
+		// through the time-travel view (entity 2 lands at tx 4)
+		expect(client.atTransaction(4).entity(2)).toEqual({ id: 2, name: 'Bob', friend: 1 });
+		expect(client.atTransaction(4).entity(2, { refs: 'ref' })).toEqual({ id: 2, name: 'Bob', friend: ref(1) });
+		expect(client.atTransaction(4).find({ friend: ref(1) }, { refs: 'ref' })).toEqual([
+			{ id: 2, name: 'Bob', friend: ref(1) }
 		]);
 	});
 });

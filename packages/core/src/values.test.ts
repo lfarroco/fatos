@@ -301,13 +301,94 @@ describe('db/ref schema support', () => {
 	});
 });
 
-describe('ref() round-trip', () => {
-	it('stores and returns branded ref values from entity', () => {
+describe('ref() read shape (plain ids by default, design/01)', () => {
+	it('entity() returns ref() values as plain ids by default', () => {
 		const db = createDatabase();
 		db.add(1, 'friend', ref(42));
-		const entity = db.entity(1) as { id: number; friend: Ref };
+		const entity = db.entity(1) as { id: number; friend: unknown };
+		expect(entity.friend).toBe(42);
+		expect(isRef(entity.friend)).toBe(false);
+	});
+
+	it('entity() keeps branded ref() values with { refs: "ref" }', () => {
+		const db = createDatabase();
+		db.add(1, 'friend', ref(42));
+		const entity = db.entity(1, undefined, { refs: 'ref' }) as { id: number; friend: Ref };
 		expect(isRef(entity.friend)).toBe(true);
 		expect(entity.friend[REF_BRAND]).toBe(42);
+	});
+
+	it('find() unwraps ref values by default and honors { refs: "ref" }', () => {
+		const db = createDatabase();
+		db.add(1, 'friend', ref(42));
+		db.add(2, 'friend', ref(43));
+		expect(db.find({ friend: ref(42) })).toEqual([{ id: 1, friend: 42 }]);
+		expect(db.find({ friend: ref(42) }, { refs: 'ref' })).toEqual([{ id: 1, friend: ref(42) }]);
+	});
+
+	it('unwraps ref values inside cardinality-many attributes element-wise', () => {
+		const db = createDatabase();
+		db.transact([{ ident: 'user/friends', valueType: 'ref', cardinality: 'many' }]);
+		db.transact([
+			['add', 1, 'user/friends', ref(2)],
+			['add', 1, 'user/friends', ref(3)]
+		]);
+		expect(db.entity(1)).toEqual({ id: 1, 'user/friends': [2, 3] });
+		expect(db.entity(1, undefined, { refs: 'ref' })).toEqual({
+			id: 1,
+			'user/friends': [ref(2), ref(3)]
+		});
+	});
+
+	it('keeps lookupRef targets branded in both modes (unwrapping needs the unique-index lookup)', () => {
+		const db = createDatabase();
+		const lookup = lookupRef(['user/email', 'a@b.c']);
+		db.add(1, 'manager', lookup);
+		db.add(2, 'boss', ref(lookup));
+
+		const plain = db.entity(1) as { id: number; manager: unknown };
+		expect(isLookupRef(plain.manager)).toBe(true);
+		expect(plain.manager[LOOKUP_REF_BRAND]).toEqual(['user/email', 'a@b.c']);
+
+		const refMode = db.entity(2, undefined, { refs: 'ref' }) as { id: number; boss: unknown };
+		expect(isRef(refMode.boss)).toBe(true);
+
+		const defaultMode = db.entity(2) as { id: number; boss: unknown };
+		expect(isRef(defaultMode.boss)).toBe(true); // ref(lookupRef(...)) stays branded
+		expect(isLookupRef((defaultMode.boss as Ref)[REF_BRAND])).toBe(true);
+	});
+
+	it('applies the option through the at(tx) time-travel view', () => {
+		const db = createDatabase();
+		db.add(1, 'friend', ref(42)); // tx 1
+		db.add(1, 'name', 'one'); // tx 2
+		db.transact([['add', 1, 'name', 'two']]); // tx 3
+
+		expect(db.at(2).entity(1)).toEqual({ id: 1, friend: 42, name: 'one' });
+		expect(db.at(2).entity(1, { refs: 'ref' })).toEqual({ id: 1, friend: ref(42), name: 'one' });
+		expect(db.at(2).find({ friend: ref(42) })).toEqual([{ id: 1, friend: 42, name: 'one' }]);
+		expect(db.at(2).find({ friend: ref(42) }, { refs: 'ref' })).toEqual([
+			{ id: 1, friend: ref(42), name: 'one' }
+		]);
+	});
+
+	it('leaves pull() unchanged (ref traversal already returns { id } shapes)', () => {
+		const db = createDatabase();
+		db.transact([
+			{ ident: 'user/name', valueType: 'string', cardinality: 'one' },
+			{ ident: 'user/manager', valueType: 'ref', cardinality: 'one' }
+		]);
+		db.transact([
+			['add', 1, 'user/name', 'Boss'],
+			['add', 2, 'user/name', 'Peon'],
+			['add', 2, 'user/manager', ref(1)]
+		]);
+
+		expect(db.pull(2, 'user.name user.manager')).toEqual({
+			id: 2,
+			'user/name': 'Peon',
+			'user/manager': { id: 1 }
+		});
 	});
 
 	it('stores lookupRef values as-is (resolved by upsert in P1)', () => {
@@ -319,11 +400,12 @@ describe('ref() round-trip', () => {
 		expect(entity.manager[LOOKUP_REF_BRAND]).toEqual(['user/email', 'a@b.c']);
 	});
 
-	it('find matches ref values by target', () => {
+	it('find matches ref values by target regardless of the read shape', () => {
 		const db = createDatabase();
 		db.add(1, 'friend', ref(42));
 		db.add(2, 'friend', ref(43));
-		expect(db.find({ friend: ref(42) })).toEqual([{ id: 1, friend: ref(42) }]);
+		expect(db.find({ friend: ref(42) })).toEqual([{ id: 1, friend: 42 }]);
+		expect(db.find({ friend: ref(42) }, { refs: 'ref' })).toEqual([{ id: 1, friend: ref(42) }]);
 	});
 });
 

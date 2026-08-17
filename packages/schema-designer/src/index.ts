@@ -362,6 +362,10 @@ function matchEntityNameFromRefName(refName: string, entityNames: string[]): str
  * Resolves the target entity of a ref attribute: first from stored ref values
  * in the entity data (the target row's owner entity), falling back to the
  * ref-name heuristic when there is no (resolvable) data.
+ *
+ * The stored value on a ref attribute may already be a plain entity id (or an
+ * array of them for cardinality-many) instead of a branded `ref()` — those
+ * are resolved here too, scoped to ref-typed attributes only.
  */
 function resolveRelationshipTargetEntityName(
 	ident: string,
@@ -370,7 +374,7 @@ function resolveRelationshipTargetEntityName(
 	entityNames: string[]
 ): string | null {
 	for (const row of rows) {
-		const targetId = refTargetId(row[ident], rows);
+		const targetId = refTargetId(row[ident], rows) ?? plainRefTargetId(row[ident], rows);
 		if (targetId === null) {
 			continue;
 		}
@@ -387,6 +391,21 @@ function resolveRelationshipTargetEntityName(
 	}
 
 	return matchEntityNameFromRefName(refName, entityNames);
+}
+
+/**
+ * The default core read shape for a `ref()` value: a plain entity id, or an
+ * array of plain ids for cardinality-many ref attributes. Only values that
+ * name an actual row are treated as references.
+ */
+function plainRefTargetId(value: unknown, rows: Array<Record<string, unknown> & { id: number }>): EntityId | null {
+	const candidates = Array.isArray(value) ? value : [value];
+	for (const item of candidates) {
+		if ((typeof item === 'number' || typeof item === 'string') && rows.some((row) => row.id === item)) {
+			return item;
+		}
+	}
+	return null;
 }
 
 /**

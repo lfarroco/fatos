@@ -149,6 +149,23 @@ export type FindOptions = {
 	limit?: number;
 	offset?: number;
 	select?: string[];
+	/** How `ref()` values read back from entity state (see {@link EntityReadOptions}). */
+	refs?: 'id' | 'ref';
+};
+
+/**
+ * Read options for entity-shaped reads (`entity` / `find` / the `at(tx)`
+ * view), design/01: "values of ref-typed attributes may be returned as
+ * `ref()` values when a flag is set (default: plain id, for ergonomics and
+ * JSON compatibility)".
+ */
+export type EntityReadOptions = {
+	/**
+	 * `'id'` (default) unwraps `ref(number|string)` values to the plain entity
+	 * id; `'ref'` keeps the branded `ref()` value. `lookupRef` targets always
+	 * stay branded either way (unwrapping them needs the unique-index lookup).
+	 */
+	refs?: 'id' | 'ref';
 };
 
 /** A plain attribute map accepted by `insert`/`upsert`; `id` is optional. */
@@ -264,6 +281,27 @@ export function isTemp(value: unknown): value is TempHandle {
 
 export function isLookupRef(value: unknown): value is LookupRef {
 	return typeof value === 'object' && value !== null && LOOKUP_REF_BRAND in value;
+}
+
+/**
+ * Applies the `refs` read option (design/01) to one stored value: in `'id'`
+ * mode (default) a `ref(number|string)` unwraps to the plain entity id;
+ * `ref(lookupRef(...))` and bare `lookupRef(...)` stay branded (resolving
+ * them needs the unique-index lookup, which `pull` does separately).
+ */
+function unwrapRefValue(value: unknown, refs: 'id' | 'ref'): unknown {
+	if (refs === 'ref') {
+		return value;
+	}
+
+	if (isRef(value)) {
+		const target = value[REF_BRAND];
+		if (typeof target === 'number' || typeof target === 'string') {
+			return target;
+		}
+	}
+
+	return value;
 }
 
 /**
@@ -1816,8 +1854,9 @@ export class FactDatabase {
 			.sort((left, right) => left.ident.localeCompare(right.ident));
 	}
 
-	entity(eid: EntityId, tx?: number): EntityState | null {
+	entity(eid: EntityId, tx?: number, options?: EntityReadOptions): EntityState | null {
 		const txLimit = normalizeTxLimit(tx);
+		const refs = options?.refs ?? 'id';
 		const entityAttributes = this.eavt.get(eid);
 		if (!entityAttributes) {
 			return null;
@@ -1865,7 +1904,10 @@ export class FactDatabase {
 
 		const entity: EntityState = { id: eid };
 		for (const [attribute, value] of state) {
-			entity[attribute] = value instanceof Map ? Object.freeze(Array.from(value.values())) : value;
+			entity[attribute] =
+				value instanceof Map
+					? Object.freeze(Array.from(value.values(), (item) => unwrapRefValue(item, refs)))
+					: unwrapRefValue(value, refs);
 		}
 
 		const frozen = Object.freeze(entity);
@@ -1887,7 +1929,7 @@ export class FactDatabase {
 		const matches: EntityState[] = [];
 
 		for (const eid of this.candidateEidsForCriteria(criteria, txLimit)) {
-			const entity = this.entity(eid, txLimit);
+			const entity = this.entity(eid, txLimit, { refs: opts.refs ?? 'id' });
 			if (!entity) {
 				continue;
 			}
@@ -2190,13 +2232,13 @@ export class FactDatabase {
 	 * remains as an alias.
 	 */
 	at(tx: number): {
-		entity: (eid: EntityId) => EntityState | null;
+		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
 		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
 		query: (spec: QuerySpec) => QueryTerm[][];
 		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
 	} {
 		return {
-			entity: (eid: EntityId) => this.entity(eid, tx),
+			entity: (eid: EntityId, options?: EntityReadOptions) => this.entity(eid, tx, options),
 			find: (criteria: Record<string, unknown>, options?: FindOptions) =>
 				this.find(criteria, { ...options, tx }),
 			query: (spec: QuerySpec) => this.query(spec, tx),

@@ -12,6 +12,7 @@
 import {
 	createDatabase,
 	type EntityId,
+	type EntityReadOptions,
 	type Fact,
 	type FactTuple,
 	type FactDatabase,
@@ -199,8 +200,8 @@ export class FatosClient extends EventTarget {
 		return this.db.getSchemas();
 	}
 
-	entity(eid: EntityId, tx?: number): EntityState | null {
-		return this.db.entity(eid, tx) as EntityState | null;
+	entity(eid: EntityId, tx?: number, options?: EntityReadOptions): EntityState | null {
+		return this.db.entity(eid, tx, options) as EntityState | null;
 	}
 
 	/**
@@ -269,7 +270,7 @@ export class FatosClient extends EventTarget {
 
 	atTransaction(tx: number) {
 		return {
-			entity: (eid: EntityId) => this.entity(eid, tx),
+			entity: (eid: EntityId, options?: EntityReadOptions) => this.entity(eid, tx, options),
 			find: (criteria: Record<string, unknown>, options?: FindOptions) =>
 				this.find(criteria, { ...options, tx }),
 			query: (spec: QuerySpec) => this.query(spec, tx)
@@ -360,6 +361,7 @@ export type {
 
 export type {
 	EntityId,
+	EntityReadOptions,
 	Fact,
 	FactTuple,
 	FactDatabase,
