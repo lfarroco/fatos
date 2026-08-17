@@ -82,10 +82,9 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 	const atHead = activeTx === head;
 
 	const { nodes, edges } = useMemo(() => readBoardAt(db, activeTx), [db, activeTx]);
-	const diff = useMemo(
-		() => (activeTx > 0 ? db.diff(activeTx - 1, activeTx) : { added: [], retracted: [] }),
-		[db, activeTx]
-	);
+	const stepFacts = useMemo(() => (activeTx > 0 ? db.transactionFacts(activeTx) : []), [db, activeTx]);
+	const stepAdded = stepFacts.filter((fact) => fact[4] === 'add');
+	const stepRetracted = stepFacts.filter((fact) => fact[4] === 'retract');
 	const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
 
@@ -356,12 +355,12 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 							<p className="muted">No transactions yet.</p>
 						) : (
 							<ul className="diff">
-								{diff.added.map((fact, index) => (
+								{stepAdded.map((fact, index) => (
 									<li key={`add-${index}`} className="add-fact">
 										+ [{String(fact[0])} {fact[1]} = {formatFactValue(fact[2])}]
 									</li>
 								))}
-								{diff.retracted.map((fact, index) => (
+								{stepRetracted.map((fact, index) => (
 									<li key={`retract-${index}`} className="retract-fact">
 										− [{String(fact[0])} {fact[1]} = {formatFactValue(fact[2])}]
 									</li>

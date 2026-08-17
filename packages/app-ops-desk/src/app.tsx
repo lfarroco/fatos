@@ -232,11 +232,22 @@ function TimeTravelPanel(): ReactElement {
 	const transactions = useTransaction();
 	const headTx = transactions.length === 0 ? 0 : transactions[transactions.length - 1][0];
 	const [tx, setTx] = useState<number>(headTx);
+	const [asOf, setAsOf] = useState<string>('');
 	useClientTick(client);
 
 	useEffect(() => {
 		setTx((current) => Math.min(current, headTx));
 	}, [headTx]);
+
+	const jumpToTime = (): void => {
+		const ms = new Date(asOf).getTime();
+		if (Number.isNaN(ms)) {
+			return;
+		}
+		// txAtOrBefore maps the wall-clock time to the last tx committed at
+		// or before it; the scrubber then reads that exact state.
+		setTx(client.txAtOrBefore(ms));
+	};
 
 	const atHead = tx >= headTx;
 	const items = sortBy(client.find({ 'item/sku': { $exists: true } }, tx), 'item/sku');
@@ -259,6 +270,20 @@ function TimeTravelPanel(): ReactElement {
 				/>
 				<button disabled={atHead} onClick={() => setTx(headTx)}>
 					live
+				</button>
+			</div>
+			<div className="scrubber">
+				<label className="muted" htmlFor="as-of-time">
+					State as of:
+				</label>
+				<input
+					id="as-of-time"
+					type="datetime-local"
+					value={asOf}
+					onChange={(event) => setAsOf(event.target.value)}
+				/>
+				<button disabled={asOf === ''} onClick={jumpToTime}>
+					go
 				</button>
 			</div>
 			<p className="muted">

@@ -39,6 +39,7 @@
 import { createDatabase, deserializeValue, serializeValue } from '@fatos/core';
 import type {
 	Cardinality,
+	DatabaseSnapshot,
 	EntityId,
 	Fact,
 	FactOperation,
@@ -48,6 +49,7 @@ import type {
 	TransactionRecord,
 	ValueType
 } from '@fatos/core';
+import type { StorageAdapter } from '@fatos/persistence';
 import { FatosClient } from './index';
 
 export type SyncStatus = 'idle' | 'connecting' | 'synced' | 'reconnecting' | 'stopped';
@@ -107,6 +109,26 @@ export type SyncingClientOptions = {
 	fetch?: typeof fetch;
 	/** Start from this client instead of a fresh one. Full pulls replace it. */
 	client?: FatosClient;
+	/**
+	 * Optional durable cache (StorageAdapter contract). Applied transactions
+	 * are appended to it (`adapter.append` when available, else a full
+	 * snapshot save), so the mirror survives reboots. When no `client` is
+	 * provided, the cache seeds the mirror on the first connect: `load()` is
+	 * restored into the mirror (server tx numbers preserved → the resume
+	 * watermark is the cache ledger head) and `onClientReplaced` fires. The
+	 * caller owns the adapter's lifecycle (the syncing client never closes
+	 * it). In-memory mirror remains the default when omitted.
+	 */
+	adapter?: StorageAdapter;
+	/**
+	 * Seed the first catch-up with a wall-clock time (ms epoch) instead of a
+	 * tx watermark: the initial `sync` message carries `afterTime`, and the
+	 * server streams exactly the facts committed at/after that time. Once the
+	 * first sync applies, the watermark takes over for reconnects. Ignored
+	 * when `client` already carries a ledger head or after a divergence
+	 * full-resync.
+	 */
+	afterTime?: number;
 	/** Base reconnect delay in ms (doubles per attempt, capped at `maxReconnectDelayMs`). */
 	reconnectDelayMs?: number;
 	/** Upper bound for the reconnect backoff in ms. */
@@ -427,6 +449,10 @@ export class SyncingClient {
 	private readonly onStatusChange?: (status: SyncStatus) => void;
 	private readonly onError?: (error: Error) => void;
 	private readonly onClientReplaced?: (client: FatosClient) => void;
+	private readonly afterTime?: number;
+	private readonly adapter: StorageAdapter | null;
+	/** True when the caller supplied `options.client` — it wins over the cache. */
+	private readonly clientProvided: boolean;
 
 	private clientInternal: FatosClient;
 	private statusInternal: SyncStatus = 'idle';
@@ -438,6 +464,11 @@ export class SyncingClient {
 	private reconnectAttempts = 0;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private pendingFacts: readonly Fact[] = [];
+	/** In-flight cache seeding (loaded once, before the first sync message). */
+	private seedingStarted = false;
+	private seedingPromise: Promise<void> | null = null;
+	/** Serialized persistence writes so commit order is preserved. */
+	private persistQueue: Promise<void> = Promise.resolve();
 
 	constructor(options: SyncingClientOptions) {
 		this.id = `sync-${syncIdCounter++}`;
@@ -454,7 +485,17 @@ export class SyncingClient {
 		this.onStatusChange = options.onStatusChange;
 		this.onError = options.onError;
 		this.onClientReplaced = options.onClientReplaced;
+		this.afterTime = options.afterTime;
+		this.adapter = options.adapter ?? null;
+		this.clientProvided = options.client !== undefined;
 		this.clientInternal = options.client ?? new FatosClient();
+
+		// A pre-populated mirror (e.g. restored from a durable cache) carries a
+		// ledger; derive the initial watermark from its head so the first sync
+		// catches up incrementally instead of full-pulling. An empty client
+		// keeps the full-pull path (watermark stays null).
+		const ledger = this.clientInternal.getTransactions();
+		this.lastAppliedTxInternal = ledger.length === 0 ? null : ledger[ledger.length - 1][0];
 	}
 
 	/** The local mirror client. Stable across reconnects; replaced on a full-pull fallback. */
@@ -592,8 +633,129 @@ export class SyncingClient {
 			return;
 		}
 
+		// First connect may seed the mirror from the durable cache; the sync
+		// message is deferred until that load settles (no-op when unused).
+		const pendingSeed = this.startSeedingIfNeeded();
+		if (pendingSeed !== null) {
+			void pendingSeed.then(() => {
+				if (this.stopped || this.socket === null) {
+					return;
+				}
+				this.sendSyncMessage();
+			});
+			return;
+		}
+
+		this.sendSyncMessage();
+	}
+
+	private sendSyncMessage(): void {
 		const afterTx = this.needsFullResync ? undefined : (this.lastAppliedTxInternal ?? undefined);
-		this.socket.send(JSON.stringify({ type: 'sync', id: this.id, afterTx }));
+		// `afterTime` seeds the catch-up only while no tx watermark exists yet
+		// (and not after a divergence full-resync): the server maps it to a tx
+		// boundary. Once a watermark exists, reconnects use `afterTx`.
+		const afterTime = !this.needsFullResync && afterTx === undefined ? this.afterTime : undefined;
+		this.socket?.send(JSON.stringify({ type: 'sync', id: this.id, afterTx, afterTime }));
+	}
+
+	/**
+	 * Loads the durable cache once (before the first sync message) and
+	 * restores it into the mirror when it holds data. Server tx numbers are
+	 * preserved by `restore()`, so the resume watermark is the cache ledger
+	 * head; `onClientReplaced` fires because the client instance is replaced.
+	 * Returns null when no seeding can/will happen, else the in-flight
+	 * promise. A caller-provided `client` wins over the cache.
+	 */
+	private startSeedingIfNeeded(): Promise<void> | null {
+		const adapter = this.adapter;
+		if (adapter === null || this.clientProvided) {
+			return null;
+		}
+		if (this.seedingStarted) {
+			return this.seedingPromise;
+		}
+		this.seedingStarted = true;
+		this.seedingPromise = adapter
+			.load()
+			.then((snapshot) => {
+				if (snapshot.facts.length === 0 && snapshot.transactions.length === 0) {
+					return;
+				}
+				const db = createDatabase();
+				db.restore(snapshot);
+				this.clientInternal = new FatosClient(db);
+				const ledger = snapshot.transactions;
+				this.lastAppliedTxInternal = ledger.length === 0 ? null : ledger[ledger.length - 1][0];
+				this.onClientReplaced?.(this.clientInternal);
+			})
+			.catch((error: unknown) => {
+				this.reportError(error instanceof Error ? error : new Error(String(error)));
+			});
+		return this.seedingPromise;
+	}
+
+	/** Queues a cache write, serialized so commit order is preserved. */
+	private enqueuePersist(work: () => Promise<void>): void {
+		if (this.adapter === null) {
+			return;
+		}
+		this.persistQueue = this.persistQueue.then(work).catch((error: unknown) => {
+			this.reportError(error instanceof Error ? error : new Error(String(error)));
+		});
+	}
+
+	/**
+	 * Persists one applied transaction (server tx numbering) to the cache:
+	 * `adapter.append` when the adapter has the fast path, else a full
+	 * snapshot save of the mirror. Metadata is revived from its wire tags so
+	 * the cache holds engine values like the server's ledger.
+	 */
+	private persistTransaction(transaction: TransactionRecord, facts: readonly Fact[]): void {
+		const adapter = this.adapter;
+		if (adapter === null) {
+			return;
+		}
+		const revived: TransactionRecord = [
+			transaction[0],
+			transaction[1],
+			transaction[2] === null ? null : deserializeMetadata(transaction[2])
+		];
+		// Bind so class-based adapters keep `this` (append is a method).
+		const append = adapter.append?.bind(adapter);
+		if (append !== undefined) {
+			this.enqueuePersist(() => append(revived, facts));
+			return;
+		}
+		this.enqueuePersist(() => adapter.save(this.mirrorSnapshot()));
+	}
+
+	/** Persists each transaction of an applied catch-up delta (server txs). */
+	private persistDelta(delta: FactLog): void {
+		for (const transaction of delta.transactions) {
+			const tx = transaction[0];
+			this.persistTransaction(transaction, delta.facts.filter((fact) => fact[3] === tx));
+		}
+	}
+
+	/** Replaces the cache after a rebuild (full pull or first catch-up). */
+	private persistRebuild(facts: readonly Fact[], transactions: readonly TransactionRecord[]): void {
+		const adapter = this.adapter;
+		if (adapter === null) {
+			return;
+		}
+		const revived = transactions.map(
+			([tx, timestamp, metadata]) =>
+				[tx, timestamp, metadata === null ? null : deserializeMetadata(metadata)] as TransactionRecord
+		);
+		this.enqueuePersist(() => adapter.save({ facts: facts.slice(), transactions: revived }));
+	}
+
+	/** The mirror's current fact log + ledger (the no-`append` fallback). */
+	private mirrorSnapshot(): DatabaseSnapshot {
+		return {
+			facts: this.clientInternal.getFacts().slice(),
+			transactions: this.clientInternal.getTransactions().slice()
+		};
 	}
 
 	private handleMessage(event: unknown): void {
@@ -669,6 +831,7 @@ export class SyncingClient {
 		const transactions = snapshot.transactions.filter(([tx]) => factTxs.has(tx));
 
 		this.rebuildClient({ facts: deserialized, transactions });
+		this.persistRebuild(deserialized, transactions);
 
 		const ledger = snapshot.transactions;
 		this.lastAppliedTxInternal = ledger.length === 0 ? null : ledger[ledger.length - 1][0];
@@ -681,6 +844,7 @@ export class SyncingClient {
 
 		if (this.needsFullResync || this.lastAppliedTxInternal === null) {
 			this.rebuildClient({ facts: deserialized, transactions });
+			this.persistRebuild(deserialized, transactions);
 			this.needsFullResync = false;
 			this.setStatus('synced');
 			return;
@@ -702,6 +866,7 @@ export class SyncingClient {
 		if (result.lastApplied !== null) {
 			this.lastAppliedTxInternal = result.lastApplied;
 		}
+		this.persistDelta(delta);
 		this.setStatus('synced');
 	}
 
@@ -722,6 +887,7 @@ export class SyncingClient {
 				);
 			}
 			this.lastAppliedTxInternal = tx;
+			this.persistTransaction(event.transaction, facts);
 		} catch (error) {
 			this.needsFullResync = true;
 			this.reportError(

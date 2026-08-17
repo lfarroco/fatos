@@ -30,7 +30,8 @@
 	"author": "",
 	"license": "MIT",
 	"dependencies": {
-		"@fatos/core": "file:../core"
+		"@fatos/core": "file:../core",
+		"@fatos/persistence": "file:../persistence"
 	},
 	"devDependencies": {
 		"@types/node": "^20.10.0",

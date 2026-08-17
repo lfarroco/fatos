@@ -15,6 +15,171 @@ Format:
 ```
 
 ---
+## [2026-08-17] core+client — G6: `db.transactionFacts(tx)` / `db.transaction(tx)` convenience
+- **Task**: G6 (P3) — Convenience for "facts committed by tx N" / tx metadata
+  (docs/niche-gap-tasks.md)
+- **Found by**: G6 implementation (packages/core, packages/client,
+  packages/app-replay)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Consumers hand-rolled "what did tx N do": Replay's step-diff
+  panel called `db.diff(tx - 1, tx)`, and audit panels filtered
+  `getFacts()`/`getTransactions()` by hand. Added the direct convenience:
+  - **`db.transactionFacts(tx)`** — the facts committed in transaction `tx`
+    (empty when unknown).
+  - **`db.transaction(tx)`** — the ledger record `[tx, timestamp, metadata]`
+    for `tx`, or null when unknown.
+  - **`FatosClient` passthrough** for both.
+- **Resolution**: core: two methods next to `getTransactions` (+1 test:
+  per-tx facts incl. a retract+add tx, unknown-tx empty/null, record with
+  metadata); client: passthrough (+1 test); app-replay: the "This step
+  (diff)" panel now reads `db.transactionFacts(activeTx)` and groups by op
+  instead of `db.diff(tx - 1, tx)` (the acceptance criterion). Validation:
+  core 240 tests green (was 239), client 63 (was 62), full suite 506 green,
+  repo-wide typecheck clean, lint clean, core/client dist rebuilt.
+
+---
+## [2026-08-17] client — G10: persist the syncing mirror via an injected adapter
+- **Task**: G10 (P2) — Persisting the syncing mirror (durable local cache)
+  (docs/niche-gap-tasks.md; depends on G8's watermark derivation, done
+  earlier today)
+- **Found by**: G10 implementation (packages/client, docs/client-guide.md,
+  docs/sync-strategies.md)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: The mirror lived only in memory, so a device that rebooted
+  lost its cache. `createSyncingClient` now accepts an optional
+  `adapter?: StorageAdapter` (type-only import from `@fatos/persistence`,
+  added as a client dependency) and persists every applied transaction:
+  - **Full pull / first catch-up** → `adapter.save(snapshot)` replaces the
+    cache with the restored mirror (server tx numbers, metadata revived from
+    wire tags — a `load()` → `restore()` round-trip reproduces the mirror).
+  - **Live sync-event / incremental catch-up** → `adapter.append(transaction,
+    facts)` per applied transaction (bound via `.bind(adapter)` so class-based
+    adapters keep `this`); adapters without `append` fall back to a full
+    snapshot `save()` of the mirror. Writes run on a serialized promise queue
+    so commit order is preserved and failures surface via `onError`.
+  - **Boot** → the first `handleOpen` defers the sync message until
+    `adapter.load()` settles; a non-empty cache is restored into the mirror
+    (server tx numbers preserved → the resume watermark is the cache ledger
+    head) and `onClientReplaced` fires; an empty cache keeps the fresh client
+    and full-pulls; an explicit `options.client` wins over the cache (no
+    seeding). The syncing client never closes the adapter (caller-owned).
+- **Resolution**: sync.ts `adapter` option + seeding (`startSeedingIfNeeded`,
+  deferred `sendSyncMessage`) + persistence (`enqueuePersist` serialized
+  queue, `persistTransaction`/`persistDelta`/`persistRebuild`,
+  `mirrorSnapshot` no-append fallback) hooked into `applySnapshot`,
+  `applyCatchUp`, `applyLiveTransaction`; client package.json gained
+  `@fatos/persistence` (type-only use). Tests: sync.test.ts FakeAdapter
+  (+4: append on full-pull save / live event / delta per-tx, seed-from-cache
+  with watermark + `onClientReplaced`, empty-cache full-pull, provided-client
+  wins over cache). Docs: client-guide §"Durable device cache (resume across
+  reboots)", sync-strategies §"Durable cache (device resume)" + when-to-use
+  row. Validation: client 62 tests green (was 58), full suite 504 green,
+  repo-wide typecheck clean, lint clean, client + persistence dist rebuilt.
+
+---
+## [2026-08-17] client — G8: syncing client derives its watermark from a restored cache
+- **Task**: G8 (P1) — Syncing client can't resume from a restored cache
+  (watermark not derived) (docs/niche-gap-tasks.md)
+- **Found by**: G8 implementation (packages/client, docs/sync-strategies.md)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `SyncingClient` started with `lastAppliedTxInternal = null`
+  even when `options.client` was a pre-populated mirror (e.g. restored from a
+  durable IndexedDB/File cache after a reboot), so `handleOpen` always sent
+  `afterTx: undefined` → full pull + client replacement — a device re-pulled
+  the whole world instead of resuming incrementally. The constructor now
+  derives the initial watermark from the provided client's ledger head
+  (`ledger[ledger.length - 1][0]`, `null` for an empty ledger), so the first
+  connect is an incremental `afterTx` catch-up against the real server
+  frontier. Unchanged: empty clients (no ledger) still full-pull, and the
+  divergence full-resync path (`needsFullResync`) still omits `afterTx`.
+  Precedence with G9's `afterTime`: a restored ledger head wins over
+  `afterTime` (matches the option's documented contract).
+- **Resolution**: constructor watermark derivation in
+  `packages/client/src/sync.ts` (+2 tests in sync.test.ts: a pre-populated
+  client connects with `afterTx: 1`, receives only the delta, keeps the same
+  client instance (no `onClientReplaced`), and merges tx 2; an empty provided
+  client still sends a watermark-less `sync` and full-pulls via `snapshot`);
+  docs/sync-strategies.md gained §2b "Resuming from a restored cache" and a
+  when-to-use row. Validation: client 58 tests green (was 56), full suite 500
+  green, repo-wide typecheck clean, lint at the pre-existing warning count,
+  client dist rebuilt.
+
+---
+## [2026-08-17] core+server+client — G9: `afterTime` sync catch-up / `GET /facts?since=`
+- **Task**: G9 (P2) — No "facts since `<timestamp>`" on the wire (`afterTime`)
+  (docs/niche-gap-tasks.md; depends on G4's `txAtOrBefore`, done earlier
+  today)
+- **Found by**: G9 implementation (packages/core, packages/server,
+  packages/client, docs/sync-strategies.md)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: Sync catch-up was only `afterTx` (an opaque tx id), but a
+  device wants "new facts since 01-01-2026" — a wall-clock boundary. Added:
+  - **`db.txBefore(timestamp)`** (core) — the strict-`<` counterpart of
+    `txAtOrBefore`: the last committed tx with `timestamp < t` (0 when none),
+    same binary search over the tx-ordered ledger. Facts committed **at/after**
+    `t` are exactly the facts with `tx > txBefore(t)` — this is what makes the
+    "at/after" boundary exact (a tx committed at exactly `t` is included,
+    including duplicate-timestamp ledgers).
+  - **`sync` message `afterTime`** (server `handleSync`): `{ type: 'sync', id,
+    afterTime }` maps to a tx boundary via `db.txBefore` and reuses the
+    existing chunked `facts` + `transactions` catch-up path; an explicit
+    `afterTx` wins over `afterTime`.
+  - **`GET /facts?since=<ms>`** (server `filteredFacts`) — the same
+    "facts committed at/after `<ms>`" set over REST for one-shot pulls.
+  - **Client `createSyncingClient({ afterTime })`** — seeds only the first
+    connect's `sync` message with `afterTime`; once the catch-up applies, the
+    watermark (streamed ledger head) takes over and reconnects use `afterTx`
+    (an explicit `client` ledger head or a divergence full-resync also
+    suppress it).
+- **Resolution**: core `txBefore` (+2 tests: strict boundaries incl.
+  duplicate timestamps); server `handleSync` afterTime + `filteredFacts`
+  `since` (+2 tests: WS afterTime streams exactly txs 2,3 at/after 1500 and
+  at the exact boundary 2000; REST since= happy path, exact boundary, before
+  first commit, after last commit); client `SyncingClientOptions.afterTime` +
+  `handleOpen` wiring (+1 test: first connect sends afterTime, reconnect
+  sends afterTx from the watermark); docs/sync-strategies.md updated
+  (protocol diagram, §3 afterTime catch-up, when-to-use table). Validation:
+  core 239 tests green (was 237), server 28 (was 26), client 56 (was 55),
+  full suite 498 green, repo-wide typecheck clean, lint clean on changed
+  packages, dist rebuilt for core/server/client.
+
+---
+## [2026-08-17] core+client — G4: `db.txAtOrBefore` / `atTime` ("state as of <time>")
+- **Task**: G4 (P2) — No timestamp → tx mapping for "state as of <time>" reads
+  (docs/niche-gap-tasks.md)
+- **Found by**: G4 implementation (packages/core, packages/client,
+  packages/app-ops-desk, docs/client-guide.md)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: `at(tx)` is tx-id based while the ledger stores commit
+  timestamps (`[tx, timestamp, metadata]`), so "stock as of last Tuesday"
+  needed a manual mapping step. Added the clock-time counterpart:
+  - **`db.txAtOrBefore(timestamp)`** — the last committed tx whose timestamp
+    is `<= t`, or 0 when none qualifies. Implemented as a binary search over
+    the tx-ordered ledger (commits stamp `Date.now()` in tx order, so
+    timestamps are non-decreasing); documented that assumption.
+  - **`db.atTime(timestamp)`** — `at(txAtOrBefore(t))`, the full time-travel
+    view (entity / find / query / pull); an empty view before the first
+    commit.
+  - **`FatosClient` passthrough** — `txAtOrBefore(t)` and `atTime(t)`
+    (client-shaped view: entity / find / query).
+- **Resolution**: core: `txAtOrBefore` + `atTime` methods next to
+  `at`/`atTransaction` (+3 tests in transact-query.test.ts using
+  `restore()` for controlled timestamps, incl. a ledger-consistency property
+  and an empty-ledger case). client: passthrough (+1 test with a restored
+  db). app-ops-desk: TimeTravelPanel gained a `datetime-local` "State as of:"
+  input whose Go button runs `client.txAtOrBefore(ms)` and drives the
+  existing scrubber (the acceptance criterion). docs/client-guide.md:
+  documented the mapping under "Time-travel reads". Validation: core 237
+  tests green (was 234), client 55 green (was 54), full suite 493 green,
+  repo-wide typecheck clean, lint clean on changed packages, ops-desk bundle
+  builds.
+
+---
 ## [2026-08-17] core+client — G2: `entity()` returns `ref()` values as plain ids by default
 - **Task**: G2 (P1) — `entity()` returns `ref()` values as plain ids by default
   (docs/niche-gap-tasks.md; design/01 "default: plain id, for ergonomics and

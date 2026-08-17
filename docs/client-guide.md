@@ -141,6 +141,17 @@ const pastAdmins = client.atTransaction(lastTx).find(
 );
 ```
 
+When you know a wall-clock time instead of a transaction id, map it first:
+`txAtOrBefore(ms)` returns the last transaction whose commit timestamp is at or
+before `ms` (0 when none qualifies yet), and `atTime(ms)` is the
+`atTransaction(txAtOrBefore(ms))` view — "state as of `<time>`":
+
+```ts
+const sinceYesterday = Date.now() - 24 * 60 * 60 * 1000;
+const tx = client.txAtOrBefore(sinceYesterday);
+const yesterdayUser = client.atTime(sinceYesterday).entity(1); // same as atTransaction(tx)
+```
+
 ## Reactivity and subscriptions
 
 ### Low-level store subscription
@@ -214,6 +225,33 @@ React bindings on it) sees the write without a manual refresh. `sync.add(...)`
 and `sync.retract(...)` are sugar for single-entry writes. Entry values are
 wire-tagged, so `Date` / `bigint` / ref values round-trip. See
 [sync-strategies.md](./sync-strategies.md) for the sync protocol details.
+
+### Durable device cache (resume across reboots)
+
+Pass a `StorageAdapter` (from `@fatos/persistence`) as `adapter` to make the
+mirror durable — the device/cache pattern for edge apps that reboot:
+
+```ts
+import { createSyncingClient } from '@fatos/client';
+import { FileAdapter } from '@fatos/persistence';
+
+const adapter = new FileAdapter({ filePath: 'mirror.json' });
+const syncing = createSyncingClient({ url: 'ws://localhost:4000/ws', adapter });
+syncing.start();
+```
+
+- **Writes go to the cache**: every applied transaction (full pull, incremental
+  catch-up, or live sync-event) is appended via `adapter.append(transaction,
+  facts)` — or a full snapshot `save()` for adapters without the fast path.
+- **Reboots resume incrementally**: on the first connect, `adapter.load()` is
+  restored into the mirror, so the resume watermark is the cache ledger head
+  and only the delta since the last session is re-synced (no re-pull of the
+  whole world). `syncing.client` is replaced by the restored mirror and
+  `onClientReplaced` fires — re-bind your app the same way you do for a
+  full-pull fallback.
+- The caller owns the adapter's lifecycle — the syncing client never closes it.
+  An empty cache (or no `adapter` at all) keeps the in-memory mirror + full
+  pull as the default.
 
 ## Types you can import
 

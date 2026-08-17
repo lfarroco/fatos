@@ -658,7 +658,7 @@ export class FatosServer {
 	 * events — the full-facts counterpart of the spec-scoped subscribe
 	 * registry (design/03 `afterTx` catch-up primitive).
 	 *
-	 *   -> { type: 'sync', id, afterTx? }
+	 *   -> { type: 'sync', id, afterTx?, afterTime? }
 	 *   <- { type: 'synced', id }
 	 *   <- { type: 'snapshot', id, facts, transactions } // fresh pull (no afterTx):
 	 *                                                //   current-state facts + full ledger
@@ -668,18 +668,26 @@ export class FatosServer {
 	 *   <- { type: 'transactions', id, transactions } // ledger with tx > afterTx
 	 *   <- live: { type: 'sync-event', id, event }
 	 *
+	 * `afterTime` (ms epoch) is an alternative to `afterTx`: it maps to a tx
+	 * boundary via the ledger so the catch-up streams exactly the facts
+	 * committed at/after that timestamp ("facts since <time>").
+	 *
 	 * The live subscription is registered *before* the catch-up is computed
 	 * and sent; everything runs synchronously in one event-loop tick, so a
 	 * commit can never fall into the gap between the catch-up snapshot and the
 	 * live stream.
 	 */
 	private handleSync(client: WebSocket, message: JsonObject): void {
-		const { id, afterTx } = message;
+		const { id, afterTx, afterTime } = message;
 		if (typeof id !== 'string' || id === '') {
 			return;
 		}
 
 		if (afterTx !== undefined && (typeof afterTx !== 'number' || !Number.isFinite(afterTx))) {
+			return;
+		}
+
+		if (afterTime !== undefined && (typeof afterTime !== 'number' || !Number.isFinite(afterTime))) {
 			return;
 		}
 
@@ -712,7 +720,10 @@ export class FatosServer {
 		// current entity facts only — bounded by active state, not history —
 		// plus the full ledger so the client's watermark is the real server
 		// head. Incremental pulls keep the chunked full-log catch-up below.
-		if (afterTx === undefined) {
+		// `afterTime` maps to a tx boundary (catch-up = facts committed
+		// at/after that time); an explicit `afterTx` wins over it.
+		const effectiveAfterTx = afterTx ?? (afterTime === undefined ? undefined : this.db.txBefore(afterTime));
+		if (effectiveAfterTx === undefined) {
 			this.sendWebSocket(client, {
 				type: 'snapshot',
 				id,
@@ -722,8 +733,8 @@ export class FatosServer {
 			return;
 		}
 
-		const facts = this.db.getFacts().filter((fact) => fact[3] > afterTx);
-		const transactions = this.db.getTransactions().filter(([tx]) => tx > afterTx);
+		const facts = this.db.getFacts().filter((fact) => fact[3] > effectiveAfterTx);
+		const transactions = this.db.getTransactions().filter(([tx]) => tx > effectiveAfterTx);
 		// Stream the catch-up in bounded tx-ordered chunks (the db fact log is
 		// append-ordered, so consecutive slices stay ascending by tx). The
 		// client accumulates `facts` frames and applies the catch-up when the
@@ -868,6 +879,7 @@ export class FatosServer {
 
 	private filteredFacts(searchParams: URLSearchParams): readonly Fact[] {
 		const txRaw = searchParams.get('tx');
+		const sinceRaw = searchParams.get('since');
 		const eidRaw = searchParams.get('eid');
 		const attribute = searchParams.get('attribute');
 		const valueRaw = searchParams.get('value');
@@ -880,6 +892,17 @@ export class FatosServer {
 				throw new Error('Invalid tx query value');
 			}
 			facts = facts.filter((fact) => fact[3] <= tx);
+		}
+
+		if (sinceRaw !== null) {
+			// Facts committed at/after `since` (ms epoch): map to a tx
+			// boundary via the ledger, then keep every fact past it.
+			const since = Number(sinceRaw);
+			if (!Number.isFinite(since)) {
+				throw new Error('Invalid since query value');
+			}
+			const afterTx = this.db.txBefore(since);
+			facts = facts.filter((fact) => fact[3] > afterTx);
 		}
 
 		if (eidRaw !== null) {

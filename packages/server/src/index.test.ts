@@ -521,6 +521,121 @@ describe('@fatos/server', () => {
 		}
 	});
 
+	it('sync with afterTime streams exactly the facts committed at/after that time', async () => {
+		// Controlled timestamps via a storage adapter (commits stamp Date.now()).
+		const storage = new MemoryAdapter();
+		await storage.save({
+			facts: [
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null],
+				[3, 3_000, null]
+			]
+		});
+		const server = createFatosServer({ storage });
+		const { host, port } = await server.start({ port: 0 });
+		const wsUrl = `ws://${host}:${port}/ws`;
+
+		const { socket, messages } = await connectSocket(wsUrl);
+		try {
+			// afterTime 1500 → catch-up is txs 2,3 (committed at/after 1500).
+			socket.send(JSON.stringify({ type: 'sync', id: 'time-sync', afterTime: 1_500 }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'synced' && msg.id === 'time-sync';
+			});
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string; transactions?: unknown[] };
+				return msg.type === 'transactions' && msg.id === 'time-sync' && msg.transactions?.length === 2;
+			});
+
+			const factFrames = messages.filter((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'facts' && msg.id === 'time-sync';
+			}) as { facts: unknown[][] }[];
+			expect(factFrames.flatMap((frame) => frame.facts)).toEqual([
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			]);
+
+			const txFrame = messages.find((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'transactions' && msg.id === 'time-sync';
+			}) as { transactions: unknown[][] };
+			expect(txFrame.transactions.map((tx) => tx[0])).toEqual([2, 3]);
+
+			// Boundary: afterTime exactly at tx 2's timestamp includes tx 2.
+			socket.send(JSON.stringify({ type: 'sync', id: 'time-boundary', afterTime: 2_000 }));
+			await waitForMessage(messages, (message) => {
+				const msg = message as { type?: string; id?: string; transactions?: unknown[] };
+				return msg.type === 'transactions' && msg.id === 'time-boundary' && msg.transactions?.length === 2;
+			});
+			const boundaryFrames = messages.filter((message) => {
+				const msg = message as { type?: string; id?: string };
+				return msg.type === 'facts' && msg.id === 'time-boundary';
+			}) as { facts: unknown[][] }[];
+			expect(boundaryFrames.flatMap((frame) => frame.facts)).toEqual([
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			]);
+		} finally {
+			socket.close();
+			await server.stop();
+		}
+	});
+
+	it('GET /facts?since= streams facts committed at/after the timestamp', async () => {
+		const storage = new MemoryAdapter();
+		await storage.save({
+			facts: [
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null],
+				[3, 3_000, null]
+			]
+		});
+		const server = createFatosServer({ storage });
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			const sinceBody = (await (await fetch(`${baseUrl}/facts?since=1500`)).json()) as { facts: unknown[] };
+			expect(sinceBody.facts).toEqual([
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			]);
+
+			// Boundary: since exactly at tx 2's timestamp includes tx 2.
+			const boundaryBody = (await (await fetch(`${baseUrl}/facts?since=2000`)).json()) as { facts: unknown[] };
+			expect(boundaryBody.facts).toEqual([
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			]);
+
+			// Before the first commit: the whole log.
+			const allBody = (await (await fetch(`${baseUrl}/facts?since=0`)).json()) as { facts: unknown[] };
+			expect(allBody.facts).toEqual([
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[1, 'user/age', 20, 2, 'add'],
+				[1, 'user/age', 21, 3, 'add']
+			]);
+
+			// After the last commit: nothing.
+			const noneBody = (await (await fetch(`${baseUrl}/facts?since=3001`)).json()) as { facts: unknown[] };
+			expect(noneBody.facts).toEqual([]);
+		} finally {
+			await server.stop();
+		}
+	});
+
 	it('streams wire-tagged values over the SSE event stream', async () => {
 		const server = createFatosServer();
 		const { host, port } = await server.start({ port: 0 });

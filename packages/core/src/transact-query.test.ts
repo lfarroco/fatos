@@ -527,8 +527,142 @@ describe('at / diff — time travel', () => {
 		expect(db.at(2).query({ find: ['?e'], where: [['?e', 'age', 22]] })).toEqual([[1]]);
 	});
 
+	it('txAtOrBefore maps a clock time to the last tx committed at or before it', () => {
+		// Controlled timestamps via restore() (commits stamp Date.now()).
+		const db = createDatabase();
+		db.restore({
+			facts: [
+				[1, 'name', 'Alice', 1, 'add'],
+				[1, 'age', 22, 2, 'add'],
+				[1, 'name', 'Alicia', 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null],
+				[3, 3_000, null]
+			]
+		});
+
+		expect(db.txAtOrBefore(0)).toBe(0);
+		expect(db.txAtOrBefore(999)).toBe(0);
+		expect(db.txAtOrBefore(1_000)).toBe(1);
+		expect(db.txAtOrBefore(1_500)).toBe(1);
+		expect(db.txAtOrBefore(2_000)).toBe(2);
+		expect(db.txAtOrBefore(2_999)).toBe(2);
+		expect(db.txAtOrBefore(3_000)).toBe(3);
+		expect(db.txAtOrBefore(Number.POSITIVE_INFINITY)).toBe(3);
+
+		// Consistent with the ledger itself: every record is mapped to a tx
+		// at or after its own tx.
+		for (const [tx, timestamp] of db.getTransactions()) {
+			expect(db.txAtOrBefore(timestamp)).toBeGreaterThanOrEqual(tx);
+		}
+	});
+
+	it('txAtOrBefore returns 0 on an empty ledger', () => {
+		const db = createDatabase();
+		expect(db.txAtOrBefore(0)).toBe(0);
+		expect(db.txAtOrBefore(Number.POSITIVE_INFINITY)).toBe(0);
+	});
+
+	it('txBefore is the strict-< counterpart (catch-up boundary)', () => {
+		const db = createDatabase();
+		db.restore({
+			facts: [
+				[1, 'name', 'Alice', 1, 'add'],
+				[1, 'name', 'Alicia', 2, 'add'],
+				[1, 'name', 'Alicia2', 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null],
+				[3, 3_000, null]
+			]
+		});
+
+		expect(db.txBefore(0)).toBe(0);
+		expect(db.txBefore(1_000)).toBe(0); // strictly before: tx 1 at exactly 1000 is excluded
+		expect(db.txBefore(1_001)).toBe(1);
+		expect(db.txBefore(2_000)).toBe(1);
+		expect(db.txBefore(2_001)).toBe(2);
+		expect(db.txBefore(3_000)).toBe(2);
+		expect(db.txBefore(Number.POSITIVE_INFINITY)).toBe(3);
+	});
+
+	it('txBefore handles duplicate timestamps (boundary includes equal-time txs)', () => {
+		const db = createDatabase();
+		db.restore({
+			facts: [
+				[1, 'name', 'a', 1, 'add'],
+				[1, 'name', 'b', 2, 'add'],
+				[1, 'name', 'c', 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 1_000, null],
+				[3, 2_000, null]
+			]
+		});
+
+		// Both txs at timestamp 1000 fall strictly before 1001.
+		expect(db.txBefore(1_001)).toBe(2);
+		// "At/after 1000" therefore covers txs 1–3.
+		expect(db.txBefore(1_000)).toBe(0);
+		expect(db.txAtOrBefore(1_000)).toBe(2);
+		expect(db.txBefore(2_001)).toBe(3);
+	});
+
+	it('atTime returns the at(tx) view for the mapped transaction', () => {
+		const db = createDatabase();
+		db.restore({
+			facts: [
+				[1, 'name', 'Alice', 1, 'add'],
+				[1, 'age', 22, 2, 'add'],
+				[1, 'name', 'Alicia', 3, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null],
+				[3, 3_000, null]
+			]
+		});
+
+		// Before the first commit: an empty view (no entity, no matches).
+		expect(db.atTime(500).entity(1)).toBeNull();
+		expect(db.atTime(500).find({ name: 'Alice' })).toEqual([]);
+
+		// Between commits: state as of the latest tx at or before the time.
+		expect(db.atTime(2_500).entity(1)).toEqual({ id: 1, name: 'Alice', age: 22 });
+		expect(db.atTime(2_500).pull(1, 'name')).toEqual({ id: 1, name: 'Alice' });
+
+		// At or after the last commit: current state.
+		expect(db.atTime(3_000).entity(1)).toEqual({ id: 1, name: 'Alicia', age: 22 });
+		expect(db.atTime(Number.POSITIVE_INFINITY).entity(1)).toEqual({ id: 1, name: 'Alicia', age: 22 });
+	});
+
+	it('transactionFacts / transaction expose one transaction\'s facts and record', () => {
+		const db = createDatabase();
+		db.transact([['add', 1, 'name', 'Alice']], { source: 'a' }); // tx 1
+		db.transact([
+			['retract', 1, 'name', 'Alice'],
+			['add', 1, 'name', 'Alicia']
+		]); // tx 2
+
+		expect(db.transactionFacts(1)).toEqual([[1, 'name', 'Alice', 1, 'add']]);
+		expect(db.transactionFacts(2)).toEqual([
+			[1, 'name', 'Alice', 2, 'retract'],
+			[1, 'name', 'Alicia', 2, 'add']
+		]);
+		expect(db.transactionFacts(99)).toEqual([]);
+
+		expect(db.transaction(1)).toEqual([1, expect.any(Number), { source: 'a' }]);
+		expect(db.transaction(2)?.[0]).toBe(2);
+		expect(db.transaction(99)).toBeNull();
+	});
+
 	it('diff returns added and retracted facts between two transactions', () => {
 		const db = createDatabase();
+
 describe('datalog query — operators and non-QueryTerm constants', () => {
 	it('accepts find operator objects as constrained clauses', () => {
 		const db = createDatabase();

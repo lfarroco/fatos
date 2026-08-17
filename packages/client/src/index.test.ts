@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { isRef, ref, REF_BRAND, type Ref } from '@fatos/core';
+import { createDatabase, isRef, ref, REF_BRAND, type Ref } from '@fatos/core';
 import {
 	createClient,
 	version,
@@ -178,6 +178,39 @@ describe('@fatos/client', () => {
 		expect(client.atTransaction(4).find({ friend: ref(1) }, { refs: 'ref' })).toEqual([
 			{ id: 2, name: 'Bob', friend: ref(1) }
 		]);
+	});
+
+	it('maps clock times to transactions via txAtOrBefore / atTime', () => {
+		const db = createDatabase();
+		db.restore({
+			facts: [
+				[1, 'name', 'Alice', 1, 'add'],
+				[1, 'name', 'Alicia', 2, 'add']
+			],
+			transactions: [
+				[1, 1_000, null],
+				[2, 2_000, null]
+			]
+		});
+		const client = createClient(db);
+
+		expect(client.txAtOrBefore(500)).toBe(0);
+		expect(client.txAtOrBefore(1_500)).toBe(1);
+		expect(client.txAtOrBefore(2_500)).toBe(2);
+
+		expect(client.atTime(1_500).entity(1)).toEqual({ id: 1, name: 'Alice' });
+		expect(client.atTime(2_500).entity(1)).toEqual({ id: 1, name: 'Alicia' });
+		expect(client.atTime(2_500).find({ name: 'Alicia' })).toEqual([{ id: 1, name: 'Alicia' }]);
+	});
+
+	it('exposes transactionFacts / transaction passthroughs', () => {
+		const client = createClient();
+		client.transact([['add', 1, 'name', 'Alice']], { source: 'test' });
+
+		expect(client.transactionFacts(1)).toEqual([[1, 'name', 'Alice', 1, 'add']]);
+		expect(client.transactionFacts(99)).toEqual([]);
+		expect(client.transaction(1)?.[2]).toEqual({ source: 'test' });
+		expect(client.transaction(99)).toBeNull();
 	});
 });
 

@@ -192,6 +192,16 @@ export class FatosClient extends EventTarget {
 		return this.db.getTransactions();
 	}
 
+	/** The facts committed in transaction `tx` (empty when `tx` is unknown). */
+	transactionFacts(tx: number): Fact[] {
+		return this.db.transactionFacts(tx);
+	}
+
+	/** The transaction ledger record for `tx`, or null when unknown. */
+	transaction(tx: number): TransactionRecord | null {
+		return this.db.transaction(tx);
+	}
+
 	getSchema(ident: string): SchemaInfo | null {
 		return this.db.getSchema(ident);
 	}
@@ -275,6 +285,27 @@ export class FatosClient extends EventTarget {
 				this.find(criteria, { ...options, tx }),
 			query: (spec: QuerySpec) => this.query(spec, tx)
 		};
+	}
+
+	/**
+	 * The last committed transaction whose timestamp is `<= timestamp`, or 0
+	 * when none qualifies yet — maps a clock time to a tx id (design/02 time
+	 * travel by time).
+	 */
+	txAtOrBefore(timestamp: number): number {
+		return this.db.txAtOrBefore(timestamp);
+	}
+
+	/**
+	 * A time-travel read view "as of" a clock time: `atTransaction(txAtOrBefore(t))`
+	 * — the client-shaped view (entity / find / query) at that transaction.
+	 */
+	atTime(timestamp: number): {
+		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+	} {
+		return this.atTransaction(this.db.txAtOrBefore(timestamp));
 	}
 
 	/**

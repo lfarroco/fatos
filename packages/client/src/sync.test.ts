@@ -5,7 +5,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase } from '@fatos/core';
-import type { Fact, SyncServerMessage, SyncStatus, SyncTransactionEvent } from './index';
+import type { DatabaseSnapshot, StorageAdapter } from '@fatos/persistence';
+import type { Fact, FatosClient, SyncServerMessage, SyncStatus, SyncTransactionEvent, TransactionRecord } from './index';
 import { createClient } from './index';
 import {
 	applyDeltaToClient,
@@ -79,6 +80,49 @@ function socketHarness(): { sockets: FakeSocket[]; factory: () => FakeSocket; cu
 
 function json(message: unknown): string {
 	return JSON.stringify(message);
+}
+
+/** Flushes the persist queue (microtask-based). Loops generously so chained
+ * queue items all settle regardless of fake-timer microtask draining. */
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 20; i += 1) {
+		await Promise.resolve();
+	}
+}
+
+/** In-memory StorageAdapter that records every save/append for assertions. */
+class FakeAdapter implements StorageAdapter {
+	facts: Fact[] = [];
+	transactions: TransactionRecord[] = [];
+	saves: DatabaseSnapshot[] = [];
+	appends: Array<{ transaction: TransactionRecord; facts: Fact[] }> = [];
+	loadCalls = 0;
+
+	constructor(seed?: DatabaseSnapshot) {
+		if (seed !== undefined) {
+			this.facts = seed.facts.slice();
+			this.transactions = seed.transactions.slice();
+		}
+	}
+
+	async load(): Promise<DatabaseSnapshot> {
+		this.loadCalls += 1;
+		return { facts: this.facts.slice(), transactions: this.transactions.slice() };
+	}
+
+	async save(snapshot: DatabaseSnapshot): Promise<void> {
+		this.saves.push({ facts: snapshot.facts.slice(), transactions: snapshot.transactions.slice() });
+		this.facts = snapshot.facts.slice();
+		this.transactions = snapshot.transactions.slice();
+	}
+
+	async append(transaction: TransactionRecord, facts: readonly Fact[]): Promise<void> {
+		this.appends.push({ transaction, facts: facts.slice() });
+		this.transactions.push(transaction);
+		this.facts.push(...facts);
+	}
+
+	async close(): Promise<void> {}
 }
 
 const synced = (id: string): SyncServerMessage => ({ type: 'synced', id });
@@ -336,6 +380,303 @@ describe('createSyncingClient (fake socket)', () => {
 
 		syncing.stop();
 		expect(syncing.getStatus()).toBe('stopped');
+	});
+
+	it('sends afterTime on the first connect, then reconnects from the watermark', () => {
+		vi.useFakeTimers();
+		const harness = socketHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			reconnectDelayMs: 10,
+			afterTime: 1_500,
+			onError: (error) => errors.push(error)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({
+			type: 'sync',
+			id: syncing.id,
+			afterTime: 1_500
+		});
+
+		// Complete the afterTime catch-up: the mirror is rebuilt from the
+		// streamed delta and the watermark becomes the streamed ledger head.
+		socket.message(json(synced(syncing.id)));
+		socket.message(json({ type: 'facts', id: syncing.id, facts: [[2, 'user/age', 20, 2, 'add']] }));
+		socket.message(json({ type: 'transactions', id: syncing.id, transactions: [[2, 2000, null]] }));
+		expect(syncing.client.getFacts()).toEqual([[2, 'user/age', 20, 2, 'add']]);
+		expect(syncing.getLastAppliedTx()).toBe(2);
+
+		// Reconnect: the tx watermark wins over afterTime.
+		socket.close();
+		vi.advanceTimersByTime(10);
+		const socket2 = harness.current();
+		socket2.open();
+		expect(JSON.parse(socket2.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 2 });
+		expect(errors).toEqual([]);
+
+		syncing.stop();
+	});
+
+	it('resumes incrementally from a pre-populated client ledger (no full pull)', () => {
+		const db = createDatabase();
+		db.transact([['add', 1, 'user/name', 'Alice']]); // ledger head = 1
+		const seeded = createClient(db);
+
+		const harness = socketHarness();
+		const replaced: FatosClient[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			client: seeded,
+			// Configured, but the restored ledger head takes precedence.
+			afterTime: 500,
+			onClientReplaced: (client) => replaced.push(client)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		// First connect is an incremental sync from the ledger head — the
+		// server streams a delta, not a snapshot, so no client replacement.
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 1 });
+
+		socket.message(json(synced(syncing.id)));
+		socket.message(json({ type: 'facts', id: syncing.id, facts: [[1, 'user/name', 'Alicia', 2, 'add']] }));
+		socket.message(json({ type: 'transactions', id: syncing.id, transactions: [[2, 2000, null]] }));
+
+		expect(syncing.client).toBe(seeded);
+		expect(replaced).toEqual([]);
+		expect(syncing.client.getFacts()).toEqual([
+			[1, 'user/name', 'Alice', 1, 'add'],
+			[1, 'user/name', 'Alicia', 2, 'add']
+		]);
+		expect(syncing.getLastAppliedTx()).toBe(2);
+
+		syncing.stop();
+	});
+
+	it('full-pulls when the provided client is empty', () => {
+		const harness = socketHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			client: createClient()
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		// No ledger → no watermark → full pull (no afterTx / afterTime).
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id });
+
+		socket.message(json(synced(syncing.id)));
+		socket.message(
+			json({
+				type: 'snapshot',
+				id: syncing.id,
+				facts: [[1, 'user/name', 'Alice', 1, 'add']],
+				transactions: [[1, 1000, null]]
+			})
+		);
+		expect(syncing.getLastAppliedTx()).toBe(1);
+
+		syncing.stop();
+	});
+
+	it('persists applied transactions to an injected adapter', async () => {
+		vi.useFakeTimers();
+		const adapter = new FakeAdapter();
+		const harness = socketHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			reconnectDelayMs: 10,
+			adapter,
+			onError: (error) => errors.push(error)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		// Full pull → the cache is replaced with the restored mirror.
+		socket.message(json(synced(syncing.id)));
+		socket.message(
+			json({
+				type: 'snapshot',
+				id: syncing.id,
+				facts: [
+					[1, 'user/name', 'Alice', 1, 'add'],
+					[2, 'user/age', 30, 2, 'add']
+				],
+				transactions: [
+					[1, 1000, null],
+					[2, 2000, null]
+				]
+			})
+		);
+		await flushMicrotasks();
+		expect(adapter.saves).toHaveLength(1);
+		expect(adapter.saves[0]).toEqual({
+			facts: [
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[2, 'user/age', 30, 2, 'add']
+			],
+			transactions: [
+				[1, 1000, null],
+				[2, 2000, null]
+			]
+		});
+
+		// Live sync-event → appended with its facts (metadata revived).
+		socket.message(
+			json({
+				type: 'sync-event',
+				id: syncing.id,
+				event: {
+					type: 'transaction:committed',
+					transaction: [3, 3000, { source: 'live' }],
+					facts: [[1, 'user/name', 'Alicia', 3, 'add']]
+				}
+			})
+		);
+		await flushMicrotasks();
+		expect(adapter.appends).toHaveLength(1);
+		expect(adapter.appends[0]).toEqual({
+			transaction: [3, 3000, { source: 'live' }],
+			facts: [[1, 'user/name', 'Alicia', 3, 'add']]
+		});
+
+		// Incremental catch-up on reconnect → one append per delta transaction.
+		socket.close();
+		vi.advanceTimersByTime(10);
+		const socket2 = harness.current();
+		socket2.open();
+		socket2.message(json(synced(syncing.id)));
+		socket2.message(
+			json({
+				type: 'facts',
+				id: syncing.id,
+				facts: [
+					[1, 'user/name', 'Alicia2', 4, 'add'],
+					[2, 'user/age', 31, 5, 'add']
+				]
+			})
+		);
+		socket2.message(
+			json({
+				type: 'transactions',
+				id: syncing.id,
+				transactions: [
+					[4, 4000, null],
+					[5, 5000, null]
+				]
+			})
+		);
+		await flushMicrotasks();
+		expect(adapter.appends).toHaveLength(3);
+		expect(adapter.appends[1]).toEqual({
+			transaction: [4, 4000, null],
+			facts: [[1, 'user/name', 'Alicia2', 4, 'add']]
+		});
+		expect(adapter.appends[2]).toEqual({
+			transaction: [5, 5000, null],
+			facts: [[2, 'user/age', 31, 5, 'add']]
+		});
+		expect(errors).toEqual([]);
+
+		syncing.stop();
+	});
+
+	it('seeds the mirror from a cache adapter and resumes with its watermark', async () => {
+		const adapter = new FakeAdapter({
+			facts: [
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[2, 'user/age', 30, 2, 'add']
+			],
+			transactions: [
+				[1, 1000, null],
+				[2, 2000, null]
+			]
+		});
+		const harness = socketHarness();
+		const replaced: FatosClient[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			adapter,
+			onClientReplaced: (client) => replaced.push(client)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		// Seeding is async (adapter.load()): the sync message is deferred until
+		// the cache is restored, then sent with the cache ledger head.
+		await flushMicrotasks();
+		expect(syncing.getLastAppliedTx()).toBe(2);
+		expect(syncing.client.getFacts()).toEqual([
+			[1, 'user/name', 'Alice', 1, 'add'],
+			[2, 'user/age', 30, 2, 'add']
+		]);
+		expect(replaced).toHaveLength(1);
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 2 });
+
+		syncing.stop();
+	});
+
+	it('full-pulls when the cache adapter holds nothing', async () => {
+		const adapter = new FakeAdapter();
+		const harness = socketHarness();
+		const replaced: FatosClient[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			adapter,
+			onClientReplaced: (client) => replaced.push(client)
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		await flushMicrotasks();
+		expect(replaced).toEqual([]);
+		expect(adapter.loadCalls).toBe(1);
+		// No cache → no watermark → full pull.
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id });
+
+		syncing.stop();
+	});
+
+	it('a provided client wins over the cache adapter (no seeding)', async () => {
+		const db = createDatabase();
+		db.transact([['add', 1, 'user/name', 'Alice']]);
+		const adapter = new FakeAdapter({
+			facts: [[2, 'user/name', 'Cache', 2, 'add']],
+			transactions: [[2, 2000, null]]
+		});
+		const harness = socketHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			client: createClient(db),
+			adapter
+		});
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+
+		await flushMicrotasks();
+		expect(adapter.loadCalls).toBe(0);
+		// The provided client's ledger head drives the first sync.
+		expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'sync', id: syncing.id, afterTx: 1 });
+		expect(syncing.client.getFacts()).toEqual([[1, 'user/name', 'Alice', 1, 'add']]);
+
+		syncing.stop();
 	});
 
 	it('reports malformed frames without throwing', () => {

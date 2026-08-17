@@ -83,14 +83,14 @@ are de-emphasized under Postgres-first but remain valid library improvements.
 - [x] **G1 (P1)** — client `find`/`at(tx)` expose `orderBy`/`limit`/`offset`/`select`.
 - [x] **G2 (P1)** — `entity()` returns `ref()` values as plain ids by default.
 - [x] **G3 (P1)** — `SyncingClient` write-through (drop the per-app `api.ts`).
-- [ ] **G4 (P2)** — `db.txAtOrBefore` / `atTime` ("state as of `<time>`").
+- [x] **G4 (P2)** — `db.txAtOrBefore` / `atTime` ("state as of `<time>`").
 - [ ] **G5 (P2)** — React as-of read (`useQuery(criteria, { asOf: tx })`).
-- [ ] **G6 (P3)** — `db.transactionFacts(tx)` convenience.
+- [x] **G6 (P3)** — `db.transactionFacts(tx)` convenience.
 - [ ] **G7 (P2)** — demo follow-ups: reference-app guide, AI-agent session
       recorder, FieldSync (see note below).
-- [ ] **G8 (P1)** — syncing client derives watermark from a restored cache.
-- [ ] **G9 (P2)** — `afterTime` on sync / `GET /facts?since=`.
-- [ ] **G10 (P2)** — persist the syncing mirror via an injected adapter.
+- [x] **G8 (P1)** — syncing client derives watermark from a restored cache.
+- [x] **G9 (P2)** — `afterTime` on sync / `GET /facts?since=`.
+- [x] **G10 (P2)** — persist the syncing mirror via an injected adapter.
 
 > **G7 note.** Under the framework direction, the *AI-agent session recorder* is
 > the highest-value demo (temporal + replay + the hot 2026 market); FieldSync's

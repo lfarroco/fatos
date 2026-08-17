@@ -1778,6 +1778,19 @@ export class FactDatabase {
 	}
 
 	/**
+	 * The facts committed in transaction `tx` (empty when `tx` is unknown) —
+	 * the "what did tx N do" convenience over filtering `getFacts()`.
+	 */
+	transactionFacts(tx: number): Fact[] {
+		return this.facts.filter((fact) => fact[3] === tx);
+	}
+
+	/** The transaction ledger record for `tx`, or null when unknown. */
+	transaction(tx: number): TransactionRecord | null {
+		return this.transactions.find(([recordTx]) => recordTx === tx) ?? null;
+	}
+
+	/**
 	 * Restores a previously persisted snapshot (design/04 persistence): the fact
 	 * log and transaction ledger are replayed verbatim, preserving tx numbering,
 	 * schema state (negative schema eids are kept — they are never tempids), and
@@ -2253,6 +2266,66 @@ export class FactDatabase {
 		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
 	} {
 		return this.at(tx);
+	}
+
+	/**
+	 * The last committed transaction whose timestamp is `<= timestamp`, or 0
+	 * when no transaction qualifies yet — the clock-time counterpart to the
+	 * tx-id-based `at(tx)` (design/02 time travel). Committed transactions
+	 * are tx-ordered and each commit stamps the current time, so the ledger's
+	 * timestamps are non-decreasing; the lookup is a binary search over the
+	 * transaction log.
+	 */
+	txAtOrBefore(timestamp: number): number {
+		const transactions = this.transactions;
+		let low = 0;
+		let high = transactions.length;
+		while (low < high) {
+			const mid = (low + high) >> 1;
+			if (transactions[mid][1] <= timestamp) {
+				low = mid + 1;
+			} else {
+				high = mid;
+			}
+		}
+
+		return low === 0 ? 0 : (transactions[low - 1] as TransactionRecord)[0];
+	}
+
+	/**
+	 * The last committed transaction whose timestamp is strictly `< timestamp`,
+	 * or 0 when none qualifies — the catch-up counterpart to `txAtOrBefore`:
+	 * facts committed at/after `timestamp` are exactly the facts with
+	 * `tx > txBefore(timestamp)`. Same binary search over the tx-ordered
+	 * ledger.
+	 */
+	txBefore(timestamp: number): number {
+		const transactions = this.transactions;
+		let low = 0;
+		let high = transactions.length;
+		while (low < high) {
+			const mid = (low + high) >> 1;
+			if (transactions[mid][1] < timestamp) {
+				low = mid + 1;
+			} else {
+				high = mid;
+			}
+		}
+
+		return low === 0 ? 0 : (transactions[low - 1] as TransactionRecord)[0];
+	}
+
+	/**
+	 * A time-travel read view "as of" a clock time: `at(txAtOrBefore(t))`.
+	 * Returns an empty view when no transaction has committed yet.
+	 */
+	atTime(timestamp: number): {
+		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
+	} {
+		return this.at(this.txAtOrBefore(timestamp));
 	}
 
 	/**
