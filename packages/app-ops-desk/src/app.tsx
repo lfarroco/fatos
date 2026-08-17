@@ -10,7 +10,8 @@
  * - live queries push only the panels that actually changed,
  * - two browser windows over one server both stay in sync via WebSocket.
  *
- * Writes are REST (`postTransact`); the local mirror applies the broadcast.
+ * Writes are write-through (`sync.transact`); the server's broadcast then
+ * reaches every tab's mirror over the same sync socket.
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -19,10 +20,10 @@ import {
 	type EntityId,
 	type EntityState,
 	type FatosClient,
-	type SyncStatus
+	type SyncStatus,
+	type SyncingClient
 } from '@fatos/client';
 import { FatosProvider, useFatosClient, useQuery, useTransaction } from '@fatos/react';
-import { apiBase, postTransact } from './api';
 
 const DEFAULT_WS_URL = 'ws://localhost:4100/ws';
 
@@ -47,8 +48,14 @@ function useClientTick(client: FatosClient | null): void {
 	}, [client]);
 }
 
-function useSyncedClient(url: string): { client: FatosClient | null; status: SyncStatus; error: Error | null } {
+function useSyncedClient(url: string): {
+	client: FatosClient | null;
+	sync: SyncingClient | null;
+	status: SyncStatus;
+	error: Error | null;
+} {
 	const [client, setClient] = useState<FatosClient | null>(null);
+	const [sync, setSync] = useState<SyncingClient | null>(null);
 	const [status, setStatus] = useState<SyncStatus>('idle');
 	const [error, setError] = useState<Error | null>(null);
 
@@ -60,22 +67,19 @@ function useSyncedClient(url: string): { client: FatosClient | null; status: Syn
 			onClientReplaced: (next) => setClient(next)
 		});
 		setClient(sync.client);
+		setSync(sync);
 		sync.start();
 		return () => sync.stop();
 	}, [url]);
 
-	return { client, status, error };
+	return { client, sync, status, error };
 }
 
 function sortBy(items: EntityState[], key: string): EntityState[] {
 	return [...items].sort((left, right) => String(left[key] ?? '').localeCompare(String(right[key] ?? '')));
 }
 
-function reportError(error: unknown): void {
-	console.error('[ops-desk] write failed', error);
-}
-
-function InventoryPanel({ baseUrl }: { baseUrl: string }): ReactElement {
+function InventoryPanel({ sync }: { sync: SyncingClient }): ReactElement {
 	const client = useFatosClient();
 	const items = useQuery((db) => sortBy(db.find({ 'item/sku': { $exists: true } }), 'item/sku'));
 
@@ -84,14 +88,13 @@ function InventoryPanel({ baseUrl }: { baseUrl: string }): ReactElement {
 		if (typeof current !== 'number') {
 			return;
 		}
-		void postTransact(
-			baseUrl,
+		void sync.transact(
 			[
 				['retract', eid, 'item/stock', current],
 				['add', eid, 'item/stock', current + delta]
 			],
 			{ actor: 'ops-desk-user', action: 'adjust-stock', delta }
-		).catch(reportError);
+		);
 	};
 
 	return (
@@ -127,7 +130,7 @@ function InventoryPanel({ baseUrl }: { baseUrl: string }): ReactElement {
 	);
 }
 
-function OrdersPanel({ baseUrl }: { baseUrl: string }): ReactElement {
+function OrdersPanel({ sync }: { sync: SyncingClient }): ReactElement {
 	const orders = useQuery((db) => sortBy(db.find({ 'order/status': { $exists: true } }), 'order/number'));
 
 	const advance = (order: EntityState): void => {
@@ -136,14 +139,13 @@ function OrdersPanel({ baseUrl }: { baseUrl: string }): ReactElement {
 		if (!next) {
 			return;
 		}
-		void postTransact(
-			baseUrl,
+		void sync.transact(
 			[
 				['retract', order.id, 'order/status', current],
 				['add', order.id, 'order/status', next]
 			],
 			{ actor: 'ops-desk-user', action: 'order:transition', from: current, to: next }
-		).catch(reportError);
+		);
 	};
 
 	return (
@@ -308,18 +310,18 @@ function TimeTravelPanel(): ReactElement {
 	);
 }
 
-function Shell({ baseUrl, status, error }: { baseUrl: string; status: SyncStatus; error: Error | null }): ReactElement {
+function Shell({ sync, status, error }: { sync: SyncingClient; status: SyncStatus; error: Error | null }): ReactElement {
 	return (
 		<main className="app">
 			<header>
 				<h1>Ops Desk</h1>
 				<span className={`status status-${status}`}>{status}</span>
-				<span className="subtitle">fulfillment + inventory · {baseUrl}</span>
+				<span className="subtitle">fulfillment + inventory · {sync.httpBaseUrl}</span>
 			</header>
 			{error !== null ? <p className="error">sync error: {error.message}</p> : null}
 			<div className="grid">
-				<InventoryPanel baseUrl={baseUrl} />
-				<OrdersPanel baseUrl={baseUrl} />
+				<InventoryPanel sync={sync} />
+				<OrdersPanel sync={sync} />
 			</div>
 			<div className="grid">
 				<AuditPanel />
@@ -331,15 +333,15 @@ function Shell({ baseUrl, status, error }: { baseUrl: string; status: SyncStatus
 
 export function App(): ReactElement {
 	const [url] = useState<string>(() => defaultServerUrl());
-	const { client, status, error } = useSyncedClient(url);
+	const { client, sync, status, error } = useSyncedClient(url);
 
-	if (client === null) {
+	if (client === null || sync === null) {
 		return <p className="app">Connecting to {url}…</p>;
 	}
 
 	return (
 		<FatosProvider client={client}>
-			<Shell baseUrl={apiBase(url)} status={status} error={error} />
+			<Shell sync={sync} status={status} error={error} />
 		</FatosProvider>
 	);
 }

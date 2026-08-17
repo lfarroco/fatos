@@ -36,9 +36,10 @@
  * `onClientReplaced`). The socket is injectable so tests run against a fake.
  */
 
-import { createDatabase, deserializeValue } from '@fatos/core';
+import { createDatabase, deserializeValue, serializeValue } from '@fatos/core';
 import type {
 	Cardinality,
+	EntityId,
 	Fact,
 	FactOperation,
 	Mutation,
@@ -102,6 +103,8 @@ export type SyncingClientOptions = {
 	url: string;
 	/** Injectable socket factory (tests inject a fake; defaults to `new WebSocket(url)`). */
 	createSocket?: () => SyncSocket;
+	/** Injectable fetch for the write path (tests inject a fake; defaults to globalThis.fetch). */
+	fetch?: typeof fetch;
 	/** Start from this client instead of a fresh one. Full pulls replace it. */
 	client?: FatosClient;
 	/** Base reconnect delay in ms (doubles per attempt, capped at `maxReconnectDelayMs`). */
@@ -119,6 +122,9 @@ export type SyncingClientOptions = {
 	 */
 	onClientReplaced?: (client: FatosClient) => void;
 };
+
+/** Result of a successful write-through: the committed facts + transaction, revived from the wire. */
+export type WriteResult = { facts: Fact[]; transaction: TransactionRecord | null };
 
 let syncIdCounter = 0;
 
@@ -382,6 +388,29 @@ function defaultCreateSocket(url: string): SyncSocket {
 	return new WebSocket(url) as unknown as SyncSocket;
 }
 
+/** ws://host:port/ws → http://host:port (wss → https), path/search/hash stripped, no trailing slash. */
+function httpBaseUrlFromWsUrl(wsUrl: string): string {
+	const url = new URL(wsUrl);
+	url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+	url.pathname = '';
+	url.search = '';
+	url.hash = '';
+	return url.toString().replace(/\/$/, '');
+}
+
+/** Wire-tags an entry's value before POST (design/03); schema declaration objects pass through. */
+function serializeEntryForWrite(entry: TransactionEntryInput): unknown {
+	if (!Array.isArray(entry)) {
+		return entry;
+	}
+	const copy = entry.slice();
+	const valueIndex = copy.length === 4 ? 3 : copy.length === 3 ? 2 : -1;
+	if (valueIndex >= 0) {
+		copy[valueIndex] = serializeValue(copy[valueIndex]);
+	}
+	return copy;
+}
+
 /**
  * The live sync handle returned by {@link createSyncingClient}. Start/stop are
  * idempotent; the client instance is stable unless a full-pull fallback
@@ -389,7 +418,10 @@ function defaultCreateSocket(url: string): SyncSocket {
  */
 export class SyncingClient {
 	readonly id: string;
+	/** HTTP base for write-through (`ws://host/ws` → `http://host`, wss → https). */
+	readonly httpBaseUrl: string;
 	private readonly createSocket: () => SyncSocket;
+	private readonly fetchImpl: typeof fetch;
 	private readonly reconnectDelayMs: number;
 	private readonly maxReconnectDelayMs: number;
 	private readonly onStatusChange?: (status: SyncStatus) => void;
@@ -409,6 +441,8 @@ export class SyncingClient {
 
 	constructor(options: SyncingClientOptions) {
 		this.id = `sync-${syncIdCounter++}`;
+		this.httpBaseUrl = httpBaseUrlFromWsUrl(options.url);
+		this.fetchImpl = options.fetch ?? globalThis.fetch;
 		this.createSocket = options.createSocket ?? (() => defaultCreateSocket(options.url));
 		this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;
 		this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 30000;
@@ -430,6 +464,67 @@ export class SyncingClient {
 	/** The highest server transaction fully applied locally, or `null` before the first sync. */
 	getLastAppliedTx(): number | null {
 		return this.lastAppliedTxInternal;
+	}
+
+	/**
+	 * Write-through: applies `entries` on the server via POST /transact on the
+	 * derived HTTP base. The server's broadcast then reaches this client's
+	 * mirror through the existing sync-event path. Entry values are wire-tagged
+	 * (design/03) so Date/bigint/ref values round-trip; metadata is sent raw
+	 * (the server stores it verbatim). Rejects on network/HTTP/parse failure
+	 * and also surfaces the error via `onError`.
+	 */
+	async transact(entries: readonly TransactionEntryInput[], metadata?: Record<string, unknown>): Promise<WriteResult> {
+		let response: Response;
+		try {
+			response = await this.fetchImpl(`${this.httpBaseUrl}/transact`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ entries: entries.map(serializeEntryForWrite), metadata })
+			});
+		} catch (error) {
+			const wrapped = error instanceof Error ? error : new Error(String(error));
+			this.reportError(wrapped);
+			throw wrapped;
+		}
+		return this.handleWriteResponse(response);
+	}
+
+	/** Write-through sugar for a single add mutation. */
+	async add(eid: EntityId, attribute: string, value: unknown): Promise<WriteResult> {
+		return this.transact([['add', eid, attribute, value]]);
+	}
+
+	/** Write-through sugar for a single retract mutation. */
+	async retract(eid: EntityId, attribute: string, value: unknown): Promise<WriteResult> {
+		return this.transact([['retract', eid, attribute, value]]);
+	}
+
+	private async handleWriteResponse(response: Response): Promise<WriteResult> {
+		try {
+			if (!response.ok) {
+				const detail = await response.text().catch(() => '');
+				throw new Error(`sync write failed: ${response.status}${detail === '' ? '' : ` ${detail}`}`);
+			}
+			const body = (await response.json()) as { facts?: unknown[]; transaction?: unknown };
+			const facts = ((body.facts ?? []) as unknown[][]).map(
+				(fact) => [fact[0], fact[1], deserializeValue(fact[2]), fact[3], fact[4]] as Fact
+			);
+			const transaction = body.transaction;
+			const record: TransactionRecord | null =
+				Array.isArray(transaction) && transaction.length === 3
+					? ([
+							transaction[0],
+							transaction[1],
+							transaction[2] === null ? null : deserializeMetadata(transaction[2] as Record<string, unknown>)
+						] as TransactionRecord)
+					: null;
+			return { facts, transaction: record };
+		} catch (error) {
+			const wrapped = error instanceof Error ? error : new Error(String(error));
+			this.reportError(wrapped);
+			throw wrapped;
+		}
 	}
 
 	/** Connects and starts syncing. Safe to call again after `stop()`. */

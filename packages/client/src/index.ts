@@ -354,7 +354,8 @@ export type {
 	SyncSocket,
 	SyncStatus,
 	SyncTransactionEvent,
-	SyncingClientOptions
+	SyncingClientOptions,
+	WriteResult
 } from './sync';
 
 export type {

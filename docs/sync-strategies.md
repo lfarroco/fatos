@@ -67,6 +67,18 @@ between the catch-up snapshot and the live stream.
   `afterTx` — the mirror is rebuilt from a fresh snapshot. This is the
   documented divergence escape hatch.
 
+## Writes
+
+The syncing client is **not** read-only. `sync.transact(entries, metadata?)`
+(plus the `sync.add(eid, attribute, value)` / `sync.retract(eid, attribute, value)`
+sugar) POSTs to the HTTP base derived from the ws url — `ws://host/ws` →
+`http://host`, `wss` → `https`, hitting the server's existing
+`POST /transact`. Entry values are wire-tagged (design/03) so
+`Date` / `bigint` / ref values round-trip losslessly; metadata is stored
+verbatim. The server's broadcast then applies to the local mirror through the
+existing `sync-event` path — a write is a single REST hop that the mirror
+replays, so every tab stays consistent without any client-side write logic.
+
 ## When to use which
 
 | Situation | Strategy |

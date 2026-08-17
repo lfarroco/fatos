@@ -16,10 +16,11 @@ import {
 	createSyncingClient,
 	type EntityState,
 	type FatosClient,
-	type SyncStatus
+	type SyncStatus,
+	type SyncingClient,
+	type TransactionEntryInput
 } from '@fatos/client';
 import { FatosProvider, useFatosClient, useQuery, useTransaction } from '@fatos/react';
-import { apiBase, postTransact } from './api';
 
 const DEFAULT_WS_URL = 'ws://localhost:4200/ws';
 
@@ -34,8 +35,14 @@ function defaultServerUrl(): string {
 	return params.get('server') ?? DEFAULT_WS_URL;
 }
 
-function useSyncedClient(url: string): { client: FatosClient | null; status: SyncStatus; error: Error | null } {
+function useSyncedClient(url: string): {
+	client: FatosClient | null;
+	sync: SyncingClient | null;
+	status: SyncStatus;
+	error: Error | null;
+} {
 	const [client, setClient] = useState<FatosClient | null>(null);
+	const [sync, setSync] = useState<SyncingClient | null>(null);
 	const [status, setStatus] = useState<SyncStatus>('idle');
 	const [error, setError] = useState<Error | null>(null);
 
@@ -47,15 +54,12 @@ function useSyncedClient(url: string): { client: FatosClient | null; status: Syn
 			onClientReplaced: (next) => setClient(next)
 		});
 		setClient(sync.client);
+		setSync(sync);
 		sync.start();
 		return () => sync.stop();
 	}, [url]);
 
-	return { client, status, error };
-}
-
-function reportError(error: unknown): void {
-	console.error('[liveboard] write failed', error);
+	return { client, sync, status, error };
 }
 
 function Card({ card }: { card: EntityState }): ReactElement {
@@ -88,11 +92,11 @@ function Card({ card }: { card: EntityState }): ReactElement {
 
 function Column({
 	column,
-	baseUrl,
+	sync,
 	cards
 }: {
 	column: { id: string; label: string };
-	baseUrl: string;
+	sync: SyncingClient;
 	cards: EntityState[];
 }): ReactElement {
 	const client = useFatosClient();
@@ -111,7 +115,7 @@ function Column({
 		}
 
 		const order = cards.length;
-		const entries: unknown[] = [];
+		const entries: TransactionEntryInput[] = [];
 		if (card['card/column'] !== column.id) {
 			entries.push(['retract', id, 'card/column', card['card/column']]);
 			entries.push(['add', id, 'card/column', column.id]);
@@ -123,9 +127,7 @@ function Column({
 		if (entries.length === 0) {
 			return;
 		}
-		void postTransact(baseUrl, entries, { actor: 'liveboard-user', action: 'card:move', toColumn: column.id }).catch(
-			reportError
-		);
+		void sync.transact(entries, { actor: 'liveboard-user', action: 'card:move', toColumn: column.id });
 	};
 
 	return (
@@ -149,7 +151,7 @@ function Column({
 	);
 }
 
-function AddCard({ baseUrl }: { baseUrl: string }): ReactElement {
+function AddCard({ sync }: { sync: SyncingClient }): ReactElement {
 	const [title, setTitle] = useState('');
 
 	const handleAddCard = (): void => {
@@ -158,15 +160,14 @@ function AddCard({ baseUrl }: { baseUrl: string }): ReactElement {
 			return;
 		}
 		const id = `card-${Date.now().toString(36)}`;
-		void postTransact(
-			baseUrl,
+		void sync.transact(
 			[
 				['add', id, 'card/title', trimmed],
 				['add', id, 'card/column', 'todo'],
 				['add', id, 'card/order', 0]
 			],
 			{ actor: 'liveboard-user', action: 'card:add' }
-		).catch(reportError);
+		);
 		setTitle('');
 	};
 
@@ -192,25 +193,25 @@ function AddCard({ baseUrl }: { baseUrl: string }): ReactElement {
 
 function ColumnContainer({
 	column,
-	baseUrl
+	sync
 }: {
 	column: { id: string; label: string };
-	baseUrl: string;
+	sync: SyncingClient;
 }): ReactElement {
 	// One live query per column — a write touching only `card/column` wakes
 	// the column queries, and the memoized snapshot bails out when the result
 	// is unchanged. Ordering comes from `find`'s `orderBy`, not a JS sort.
 	const cards = useQuery({ 'card/column': column.id }, { orderBy: ['card/order', 'asc'] });
-	return <Column column={column} baseUrl={baseUrl} cards={cards} />;
+	return <Column column={column} sync={sync} cards={cards} />;
 }
 
-function Board({ baseUrl }: { baseUrl: string }): ReactElement {
+function Board({ sync }: { sync: SyncingClient }): ReactElement {
 	return (
 		<>
-			<AddCard baseUrl={baseUrl} />
+			<AddCard sync={sync} />
 			<div className="board">
 				{COLUMNS.map((column) => (
-					<ColumnContainer key={column.id} column={column} baseUrl={baseUrl} />
+					<ColumnContainer key={column.id} column={column} sync={sync} />
 				))}
 			</div>
 		</>
@@ -242,18 +243,18 @@ function ActivityLog(): ReactElement {
 	);
 }
 
-function Shell({ baseUrl, status, error }: { baseUrl: string; status: SyncStatus; error: Error | null }): ReactElement {
+function Shell({ sync, status, error }: { sync: SyncingClient; status: SyncStatus; error: Error | null }): ReactElement {
 	return (
 		<main className="app">
 			<header>
 				<h1>LiveBoard</h1>
 				<span className={`status status-${status}`}>{status}</span>
 				<span className="subtitle">
-					multi-client kanban · {baseUrl} · open this page in two tabs and drag cards
+					multi-client kanban · {sync.httpBaseUrl} · open this page in two tabs and drag cards
 				</span>
 			</header>
 			{error !== null ? <p className="error">sync error: {error.message}</p> : null}
-			<Board baseUrl={baseUrl} />
+			<Board sync={sync} />
 			<ActivityLog />
 		</main>
 	);
@@ -261,15 +262,15 @@ function Shell({ baseUrl, status, error }: { baseUrl: string; status: SyncStatus
 
 export function App(): ReactElement {
 	const [url] = useState<string>(() => defaultServerUrl());
-	const { client, status, error } = useSyncedClient(url);
+	const { client, sync, status, error } = useSyncedClient(url);
 
-	if (client === null) {
+	if (client === null || sync === null) {
 		return <p className="app">Connecting to {url}…</p>;
 	}
 
 	return (
 		<FatosProvider client={client}>
-			<Shell baseUrl={apiBase(url)} status={status} error={error} />
+			<Shell sync={sync} status={status} error={error} />
 		</FatosProvider>
 	);
 }

@@ -188,6 +188,33 @@ stopQuery();
 stopTx();
 ```
 
+## Server-backed clients (syncing client)
+
+For apps that need a live mirror of a Fatos server (a browser tab, an edge
+device), `createSyncingClient` keeps a local `FatosClient` in sync over a
+WebSocket and adds server-authoritative write-through on the same handle:
+
+```ts
+import { createSyncingClient } from '@fatos/client';
+
+const syncing = createSyncingClient({ url: 'ws://localhost:4000/ws', onError: console.error });
+syncing.start();
+
+// Write-through: POSTs to the HTTP base derived from the ws url
+// (ws://localhost:4000/ws → http://localhost:4000/transact).
+await syncing.transact(
+  [['add', 1, 'user/name', 'Alice']],
+  { actor: 'me' }
+);
+```
+
+The server commits the transaction and broadcasts it back over the sync
+socket; the local mirror applies the broadcast, so `syncing.client` (and any
+React bindings on it) sees the write without a manual refresh. `sync.add(...)`
+and `sync.retract(...)` are sugar for single-entry writes. Entry values are
+wire-tagged, so `Date` / `bigint` / ref values round-trip. See
+[sync-strategies.md](./sync-strategies.md) for the sync protocol details.
+
 ## Types you can import
 
 ```ts

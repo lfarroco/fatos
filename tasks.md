@@ -82,7 +82,7 @@ are de-emphasized under Postgres-first but remain valid library improvements.
 
 - [x] **G1 (P1)** — client `find`/`at(tx)` expose `orderBy`/`limit`/`offset`/`select`.
 - [ ] **G2 (P1)** — `entity()` returns `ref()` values as plain ids by default.
-- [ ] **G3 (P1)** — `SyncingClient` write-through (drop the per-app `api.ts`).
+- [x] **G3 (P1)** — `SyncingClient` write-through (drop the per-app `api.ts`).
 - [ ] **G4 (P2)** — `db.txAtOrBefore` / `atTime` ("state as of `<time>`").
 - [ ] **G5 (P2)** — React as-of read (`useQuery(criteria, { asOf: tx })`).
 - [ ] **G6 (P3)** — `db.transactionFacts(tx)` convenience.

@@ -48,7 +48,7 @@ append log).
 | Live queries with memoized snapshots | `InventoryPanel` / `OrdersPanel` via `useQuery` |
 | Syncing client (WS live mirror, `afterTx` catch-up) | `useSyncedClient`; two tabs stay in sync |
 | `FileAdapter` append + restart recovery | server seeds once, replays the log on restart |
-| REST `POST /transact` with wire-tagged values | `src/api.ts` |
+| REST `POST /transact` with wire-tagged values | `sync.transact` in `useSyncedClient` |
 
 ## Verdict
 
@@ -64,10 +64,9 @@ stood out as genuinely pleasant:
    free.
 
 **Friction observed:**
-- The client mirrors are read-only by design, so writes are a separate REST
-  hop (`api.ts`) rather than `client.transact(...)` reaching the server. Fine
-  for server-authoritative apps, but it means two code paths (mirror reads +
-  REST writes) for one mental model.
+- Writes are a REST hop the mirror replays (`sync.transact`) rather than
+  `client.transact(...)` reaching the server. Fine for server-authoritative
+  apps, but reads and writes still live on two surfaces (mirror + HTTP base).
 - Range reads ("stock as of Tuesday" by *timestamp*, not tx id) need an
   extra mapping step — `at(tx)` is tx-id based.
 - The "as-of" UI re-renders coarsely (subscribe + re-read). Live fine-grained

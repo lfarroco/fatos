@@ -39,8 +39,8 @@ npm run client --workspace @fatos/app-liveboard
 |---|---|
 | WebSocket live mirror with `afterTx` catch-up | `useSyncedClient` (both tabs) |
 | Live queries, narrowed per column | `ColumnContainer` → `useQuery` |
-| REST writes + broadcast + replay on each client | drop handler → `postTransact` |
-| Server-authoritative writes (mirror is read-only) | `src/api.ts` |
+| REST writes + broadcast + replay on each client | drop handler → `sync.transact` |
+| Server-authoritative write-through | `sync.transact` (mirror replays the broadcast) |
 | Transaction metadata for activity | every write carries `{ actor, action, … }` |
 | `FileAdapter` persistence | restart recovery |
 

@@ -717,4 +717,202 @@ describe('chunked catch-up', () => {
 	});
 });
 
+function fetchHarness(): {
+	calls: Array<{ url: string; init?: { method?: string; headers?: Record<string, string>; body?: string } }>;
+	respond(ok: boolean, status: number, body: unknown): void;
+	rejectWith(error: Error): void;
+	fetch: typeof fetch;
+} {
+	const calls: Array<{ url: string; init?: { method?: string; headers?: Record<string, string>; body?: string } }> = [];
+	let next: { ok: boolean; status: number; body: unknown } = { ok: true, status: 200, body: {} };
+	let rejectNext: Error | null = null;
+	return {
+		calls,
+		respond(ok: boolean, status: number, body: unknown): void {
+			next = { ok, status, body };
+		},
+		rejectWith(error: Error): void {
+			rejectNext = error;
+		},
+		fetch: (async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+			calls.push({ url, init });
+			if (rejectNext !== null) {
+				const error = rejectNext;
+				rejectNext = null;
+				throw error;
+			}
+			return {
+				ok: next.ok,
+				status: next.status,
+				json: async (): Promise<unknown> => next.body,
+				text: async (): Promise<string> => (typeof next.body === 'string' ? next.body : JSON.stringify(next.body))
+			};
+		}) as unknown as typeof fetch
+	};
+}
+
+describe('SyncingClient write-through (G3)', () => {
+	it('POSTs { entries, metadata } to the derived HTTP base and revives the response', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, {
+			facts: [
+				[1, 'user/name', 'Alice', 1, 'add'],
+				[1, 'user/born', { $date: 0 }, 1, 'add']
+			],
+			transaction: [1, 1000, { source: { $date: 1000 } }]
+		});
+
+		const result = await syncing.transact([['add', 1, 'user/name', 'Alice']], { source: 'test' });
+
+		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0]?.url).toBe('http://test/transact');
+		expect(fake.calls[0]?.init?.method).toBe('POST');
+		expect(fake.calls[0]?.init?.headers).toEqual({ 'content-type': 'application/json' });
+		expect(JSON.parse(fake.calls[0]?.init?.body ?? '')).toEqual({
+			entries: [['add', 1, 'user/name', 'Alice']],
+			metadata: { source: 'test' }
+		});
+		expect(result.facts[0]?.[2]).toBe('Alice');
+		expect(result.facts[1]?.[2]).toEqual(new Date(0));
+		expect(result.transaction?.[2]).toEqual({ source: new Date(1000) });
+	});
+
+	it('wire-tags entry values before POST', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, {});
+
+		await syncing.transact([['add', 1, 'created', new Date(123)]], { m: 1 });
+
+		expect(JSON.parse(fake.calls[0]?.init?.body ?? '')).toEqual({
+			entries: [['add', 1, 'created', { $date: 123 }]],
+			metadata: { m: 1 }
+		});
+	});
+
+	it('add() and retract() POST the right mutation entries', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+
+		await syncing.add(1, 'a', 'x');
+		await syncing.retract(1, 'a', 'x');
+
+		expect(fake.calls).toHaveLength(2);
+		expect(JSON.parse(fake.calls[0]?.init?.body ?? '')).toEqual({
+			entries: [['add', 1, 'a', 'x']],
+			metadata: undefined
+		});
+		expect(JSON.parse(fake.calls[1]?.init?.body ?? '')).toEqual({
+			entries: [['retract', 1, 'a', 'x']],
+			metadata: undefined
+		});
+	});
+
+	it('rejects on HTTP failure and surfaces the error via onError', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch,
+			onError: (error) => errors.push(error)
+		});
+		fake.respond(false, 400, 'boom');
+
+		await expect(syncing.transact([['add', 1, 'a', 'x']])).rejects.toThrow(/sync write failed: 400 boom/);
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.message).toContain('boom');
+	});
+
+	it('rejects on network failure and surfaces the error via onError', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const errors: Error[] = [];
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch,
+			onError: (error) => errors.push(error)
+		});
+		fake.rejectWith(new Error('network down'));
+
+		await expect(syncing.transact([['add', 1, 'a', 'x']])).rejects.toThrow('network down');
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.message).toBe('network down');
+	});
+
+	it('derives the HTTP base from the ws url (wss → https, no trailing slash)', async () => {
+		const harness = socketHarness();
+		const ws = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fetchHarness().fetch
+		});
+		expect(ws.httpBaseUrl).toBe('http://test');
+
+		const secureFake = fetchHarness();
+		const secure = createSyncingClient({
+			url: 'wss://secure.example/ws',
+			createSocket: harness.factory,
+			fetch: secureFake.fetch
+		});
+		expect(secure.httpBaseUrl).toBe('https://secure.example');
+		await secure.transact([['add', 1, 'a', 'x']]);
+		expect(secureFake.calls[0]?.url).toBe('https://secure.example/transact');
+	});
+
+	it('applies the server broadcast to the mirror after a write-through', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, {
+			facts: [[1, 'user/name', 'Alice', 1, 'add']],
+			transaction: [1, 1000, null]
+		});
+
+		const result = await syncing.transact([['add', 1, 'user/name', 'Alice']], { actor: 'me' });
+		expect(result.facts[0]?.[2]).toBe('Alice');
+
+		// The server's broadcast reaches the mirror through the sync path.
+		syncing.start();
+		const socket = harness.current();
+		socket.open();
+		socket.message(json(synced(syncing.id)));
+		socket.message(
+			json({
+				type: 'sync-event',
+				id: syncing.id,
+				event: {
+					type: 'transaction:committed',
+					transaction: [1, 1000, null],
+					facts: [[1, 'user/name', 'Alice', 1, 'add']]
+				}
+			})
+		);
+		expect(syncing.client.getFacts()).toContainEqual([1, 'user/name', 'Alice', 1, 'add']);
+		syncing.stop();
+	});
+});
+
 

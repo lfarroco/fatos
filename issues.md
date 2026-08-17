@@ -948,9 +948,19 @@ back to sub-agents for fixes.
 - **Task**: G3 in docs/niche-gap-tasks.md — write methods (`transact`/`add`/`retract`) on `SyncingClient` forwarded over REST to the derived HTTP base
 - **Found by**: niche-validation apps (app-ops-desk and app-liveboard each duplicate src/api.ts `postTransact`)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: `createSyncingClient` mirrors the server but cannot write; every write is a REST hop the mirror then replays.
-- **Resolution**: —
+- **Resolution**: client sync.ts gained `transact`/`add`/`retract` write-through
+  on `SyncingClient`: HTTP base derived from the ws url (`ws://host/ws` →
+  `http://host`, wss → https), injectable `fetch` option (tests inject a fake),
+  entry values wire-tagged via core `serializeValue`, response revived
+  (facts + transaction incl. metadata), failures surfaced both by rejection and
+  `onError`. Demo apps app-ops-desk and app-liveboard dropped `src/api.ts` and
+  write via `sync.transact` (mirror replays the broadcast). Docs:
+  sync-strategies.md "Writes" section, client-guide.md syncing-client section,
+  both app READMEs. Validation: client build + typecheck + lint green, 51 tests
+  pass (+7 write-through tests in sync.test.ts); both demo apps typecheck and
+  build green.
 
 ## [2026-08-16] core — G4: no timestamp→tx mapping for "state as of <time>"
 - **Task**: G4 in docs/niche-gap-tasks.md — `db.txAtOrBefore(timestamp)` / `db.atTime(timestamp)`
