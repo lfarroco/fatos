@@ -80,7 +80,7 @@ Still-open items; details + acceptance live in
 [docs/niche-gap-tasks.md](./docs/niche-gap-tasks.md). Device/edge items (G8–G10)
 are de-emphasized under Postgres-first but remain valid library improvements.
 
-- [ ] **G1 (P1)** — client `find`/`at(tx)` expose `orderBy`/`limit`/`offset`/`select`.
+- [x] **G1 (P1)** — client `find`/`at(tx)` expose `orderBy`/`limit`/`offset`/`select`.
 - [ ] **G2 (P1)** — `entity()` returns `ref()` values as plain ids by default.
 - [ ] **G3 (P1)** — `SyncingClient` write-through (drop the per-app `api.ts`).
 - [ ] **G4 (P2)** — `db.txAtOrBefore` / `atTime` ("state as of `<time>`").

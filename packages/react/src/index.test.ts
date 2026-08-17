@@ -142,6 +142,46 @@ describe('@fatos/react', () => {
 		]);
 	});
 
+	it('useQuery(criteria, { orderBy }) returns ordered results and re-sorts live on order writes', () => {
+		const client = createClient();
+		client.transact([
+			['add', 1, 'card/column', 'todo'],
+			['add', 1, 'card/order', 3],
+			['add', 2, 'card/column', 'todo'],
+			['add', 2, 'card/order', 1]
+		]);
+
+		const snapshots: EntityState[][] = [];
+		let renderCount = 0;
+		function Probe() {
+			renderCount += 1;
+			const cards = useQuery({ 'card/column': 'todo' }, { orderBy: ['card/order', 'asc'] });
+			snapshots.push(cards);
+			return createElement('div', null, String(cards.map((card) => card.id).join(',')));
+		}
+
+		render(createElement(FatosProvider, { client }, createElement(Probe)));
+		expect(renderCount).toBe(1);
+		expect(snapshots[0].map((card) => card.id)).toEqual([2, 1]);
+
+		// A write to the sort key on a matching entity re-orders live: the
+		// orderBy attribute is a tracked live dependency, not just the criteria.
+		act(() => {
+			client.transact([
+				['retract', 1, 'card/order', 3],
+				['add', 1, 'card/order', 0]
+			]);
+		});
+		expect(renderCount).toBe(2);
+		expect(snapshots[1].map((card) => card.id)).toEqual([1, 2]);
+
+		// An unrelated write does not re-render.
+		act(() => {
+			client.add(1, 'card/color', 'red');
+		});
+		expect(renderCount).toBe(2);
+	});
+
 	it('useDatalogQuery memoizes rows across unrelated writes', () => {
 		const client = createClient();
 		client.add(1, 'user/role', 'admin');

@@ -15,10 +15,13 @@ import {
 	type Fact,
 	type FactTuple,
 	type FactDatabase,
+	type FindOptions,
 	type LiveQueryOptions,
 	type LiveQueryResult,
 	type LiveResult,
 	type Mutation,
+	type OrderBy,
+	type OrderDirection,
 	type QuerySpec,
 	type QueryTerm,
 	type SchemaInfo,
@@ -200,8 +203,13 @@ export class FatosClient extends EventTarget {
 		return this.db.entity(eid, tx) as EntityState | null;
 	}
 
-	find(criteria: Record<string, unknown>, tx?: number): EntityState[] {
-		return this.db.find(criteria, tx) as EntityState[];
+	/**
+	 * Finds entities matching `criteria`. The second argument mirrors core
+	 * `FactDatabase.find`: a tx number (time-travel read) or `FindOptions`
+	 * (`orderBy` / `limit` / `offset` / `select`).
+	 */
+	find(criteria: Record<string, unknown>, options?: number | FindOptions): EntityState[] {
+		return this.db.find(criteria, options) as EntityState[];
 	}
 
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
@@ -262,7 +270,8 @@ export class FatosClient extends EventTarget {
 	atTransaction(tx: number) {
 		return {
 			entity: (eid: EntityId) => this.entity(eid, tx),
-			find: (criteria: Record<string, unknown>) => this.find(criteria, tx),
+			find: (criteria: Record<string, unknown>, options?: FindOptions) =>
+				this.find(criteria, { ...options, tx }),
 			query: (spec: QuerySpec) => this.query(spec, tx)
 		};
 	}
@@ -353,10 +362,13 @@ export type {
 	Fact,
 	FactTuple,
 	FactDatabase,
+	FindOptions,
 	LiveQueryOptions,
 	LiveQueryResult,
 	LiveResult,
 	Mutation,
+	OrderBy,
+	OrderDirection,
 	QuerySpec,
 	QueryTerm,
 	SchemaInfo,

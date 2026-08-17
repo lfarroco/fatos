@@ -58,10 +58,6 @@ function reportError(error: unknown): void {
 	console.error('[liveboard] write failed', error);
 }
 
-function byOrder(left: EntityState, right: EntityState): number {
-	return Number(left['card/order'] ?? 0) - Number(right['card/order'] ?? 0);
-}
-
 function Card({ card }: { card: EntityState }): ReactElement {
 	const [dragging, setDragging] = useState(false);
 
@@ -203,8 +199,8 @@ function ColumnContainer({
 }): ReactElement {
 	// One live query per column — a write touching only `card/column` wakes
 	// the column queries, and the memoized snapshot bails out when the result
-	// is unchanged.
-	const cards = useQuery((db) => [...db.find({ 'card/column': column.id })].sort(byOrder));
+	// is unchanged. Ordering comes from `find`'s `orderBy`, not a JS sort.
+	const cards = useQuery({ 'card/column': column.id }, { orderBy: ['card/order', 'asc'] });
 	return <Column column={column} baseUrl={baseUrl} cards={cards} />;
 }
 

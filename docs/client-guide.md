@@ -86,6 +86,16 @@ const user = client.entity(1);
 const admins = client.find({ 'user/role': 'admin' });
 ```
 
+`find` also accepts the core options — `orderBy`, `limit`, `offset`, and `select`:
+
+```ts
+const newest = client.find({ 'user/role': 'admin' }, {
+  orderBy: ['user/createdAt', 'desc'],
+  limit: 10,
+  select: ['user/name', 'user/email']
+});
+```
+
 ### Access raw facts and transactions
 
 ```ts
@@ -114,11 +124,21 @@ Read as-of a specific transaction id with `atTransaction(tx)`.
 
 ```ts
 const now = client.entity(1);
-const txId = client.getTransactions().at(-1)?.id;
+const lastTx = client.getTransactions().at(-1)?.[0];
 
-if (txId !== undefined) {
-  const pastUser = client.atTransaction(txId).entity(1);
+if (lastTx !== undefined) {
+  const pastUser = client.atTransaction(lastTx).entity(1);
 }
+```
+
+The `atTransaction(tx)` view's `find` accepts the same options as `client.find`,
+so past state can be ordered / paged / picked too:
+
+```ts
+const pastAdmins = client.atTransaction(lastTx).find(
+  { 'user/role': 'admin' },
+  { orderBy: ['user/name', 'asc'] }
+);
 ```
 
 ## Reactivity and subscriptions

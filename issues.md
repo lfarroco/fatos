@@ -932,9 +932,9 @@ back to sub-agents for fixes.
 - **Task**: G1 in docs/niche-gap-tasks.md — expose `FindOptions` on `FatosClient.find` + `atTransaction(tx).find`, and a `useQuery(criteria, options?)` react overload
 - **Found by**: niche-validation apps (app-liveboard sorts in JS; app-ops-desk ships a sortBy helper)
 - **Severity**: medium
-- **Status**: open
+- **Status**: fixed
 - **Description**: Core `FactDatabase.find` supports `{ orderBy, limit, offset, select }`; the client wrapper only accepts a tx number, so demo apps reimplement ordering.
-- **Resolution**: —
+- **Resolution**: `FatosClient.find(criteria, options?: number | FindOptions)` now delegates straight to core; `atTransaction(tx).find(criteria, options?)` merges `{ ...options, tx }` so time-travel reads keep their scope alongside ordering/paging/select. `@fatos/client` re-exports `FindOptions`/`OrderBy`/`OrderDirection`. `@fatos/react` gained `useQuery(criteria, options?)`, built on the access-tracking selector form `client.live(() => client.find(criteria, options))` so orderBy/select reads stay AEVT-tracked (a sort-key write still wakes the handle). LiveBoard dropped its JS `byOrder` sort for `useQuery({ 'card/column' }, { orderBy: ['card/order', 'asc'] })`. Docs: client-guide.md + react-guide.md updated (also fixed a stale `.at(-1)?.id` tuple-access example). Validation: client +2 tests, react +1 test; client/react builds, typechecks, and tests green; app-liveboard typecheck green.
 
 ## [2026-08-16] core — G2: `entity()` returns branded ref objects; design/01 promises plain ids by default
 - **Task**: G2 in docs/niche-gap-tasks.md — `entity(eid, tx?, { refs: 'id' | 'ref' })` defaulting to plain-id unwrapping

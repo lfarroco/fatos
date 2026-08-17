@@ -38,7 +38,7 @@ createRoot(document.getElementById('root')!).render(
 `@fatos/react` provides:
 
 - `useFatosClient()` for direct client access
-- `useQuery(criteria)` for criteria-based entity lists
+- `useQuery(criteria, options?)` for criteria-based entity lists (`orderBy` / `limit` / `offset` / `select`)
 - `useDatalogQuery(spec)` for Datalog query rows
 - `useEntity(eid)` for one entity by id
 - `useTransaction()` for transaction history
@@ -62,6 +62,12 @@ export function AdminList() {
 ```
 
 `useQuery` re-renders when matching entities change.
+
+Pass `FindOptions` for ordered / paged / selected results without a selector:
+
+```tsx
+const admins = useQuery({ 'user/role': 'admin' }, { orderBy: ['user/name', 'asc'] });
+```
 
 ## useEntity example
 

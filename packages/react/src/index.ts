@@ -26,6 +26,7 @@ import {
 	type EntityId,
 	type EntityState,
 	type FatosClient,
+	type FindOptions,
 	type LiveResult,
 	type QuerySpec,
 	type QueryTerm,
@@ -86,15 +87,16 @@ function useLiveValue<T>(deps: readonly unknown[], createLive: () => LiveResult<
 }
 
 export function useQuery<T>(selector: (db: FatosClient) => T): T;
-export function useQuery(criteria: Record<string, unknown>): EntityState[];
+export function useQuery(criteria: Record<string, unknown>, options?: FindOptions): EntityState[];
 export function useQuery<T>(
-	input: ((db: FatosClient) => T) | Record<string, unknown>
+	input: ((db: FatosClient) => T) | Record<string, unknown>,
+	options?: FindOptions
 ): T | EntityState[] {
 	if (typeof input === 'function') {
 		return useQuerySelector(input);
 	}
 
-	return useQueryCriteria(input);
+	return useQueryCriteria(input, options);
 }
 
 function useQuerySelector<T>(selector: (db: FatosClient) => T): T {
@@ -112,11 +114,17 @@ function useQuerySelector<T>(selector: (db: FatosClient) => T): T {
 	return useLiveValue([], () => client.live(() => selectorRef.current(client)));
 }
 
-function useQueryCriteria(criteria: Record<string, unknown>): EntityState[] {
+function useQueryCriteria(criteria: Record<string, unknown>, options?: FindOptions): EntityState[] {
 	const client = useFatosClient();
 	const criteriaKey = JSON.stringify(criteria);
+	const optionsKey = JSON.stringify(options ?? null);
 
-	return useLiveValue([criteriaKey], () => client.live(criteria));
+	// The criteria-form `client.live(criteria)` cannot carry options, so use
+	// the access-tracking selector form: `find` records the criteria
+	// attributes and the orderBy/select reads happen through the tracked
+	// entity proxies, keeping the AEVT-narrowed live dependencies intact
+	// (a write to a sort key still wakes the handle).
+	return useLiveValue([criteriaKey, optionsKey], () => client.live(() => client.find(criteria, options)));
 }
 
 export function useDatalogQuery(spec: QuerySpec): QueryTerm[][] {
@@ -140,4 +148,4 @@ export function useTransaction(): readonly TransactionRecord[] {
 }
 
 export { createClient };
-export type { EntityId, EntityState, FatosClient, QuerySpec, QueryTerm, TransactionRecord };
+export type { EntityId, EntityState, FatosClient, FindOptions, QuerySpec, QueryTerm, TransactionRecord };

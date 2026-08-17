@@ -14,6 +14,7 @@ import {
 	type EntityState,
 	type Fact,
 	type FatosClient,
+	type FindOptions,
 	type QueryTerm,
 	type TransactionRecord
 } from './index';
@@ -93,6 +94,65 @@ describe('@fatos/client', () => {
 
 		expect(at2.entity(7)).toEqual({ id: 7, name: 'Alice', type: 'user' });
 		expect(at3.entity(7)).toEqual({ id: 7, name: 'Alice' });
+	});
+
+	it('find supports orderBy / limit / offset / select options (G1)', () => {
+		const client = createClient();
+		client.transact([
+			['add', 1, 'card/column', 'todo'],
+			['add', 1, 'card/order', 3],
+			['add', 2, 'card/column', 'todo'],
+			['add', 2, 'card/order', 1],
+			['add', 3, 'card/column', 'todo'],
+			['add', 3, 'card/order', 2]
+		]);
+
+		const ordered = client.find({ 'card/column': 'todo' }, { orderBy: ['card/order', 'asc'] });
+		expect(ordered.map((entity) => entity.id)).toEqual([2, 3, 1]);
+
+		const page = client.find(
+			{ 'card/column': 'todo' },
+			{ orderBy: ['card/order', 'asc'], offset: 1, limit: 1 }
+		);
+		expect(page.map((entity) => entity.id)).toEqual([3]);
+
+		const picked = client.find({ 'card/column': 'todo' }, { select: ['card/order'] });
+		expect(picked).toEqual([
+			{ id: 1, 'card/order': 3 },
+			{ id: 2, 'card/order': 1 },
+			{ id: 3, 'card/order': 2 }
+		]);
+
+		// The positional tx form keeps working alongside the options form.
+		expect(client.find({ 'card/column': 'todo' }, 1).map((entity) => entity.id)).toEqual([1, 2, 3]);
+
+		// FindOptions is re-exported for consumers to name the options type.
+		const options: FindOptions = { orderBy: ['card/order', 'desc'] };
+		expect(client.find({ 'card/column': 'todo' }, options).map((entity) => entity.id)).toEqual([1, 3, 2]);
+	});
+
+	it('atTransaction(tx).find accepts options while keeping the tx scope (G1)', () => {
+		const client = createClient();
+		client.transact([
+			['add', 1, 'card/column', 'todo'],
+			['add', 1, 'card/order', 3]
+		]);
+		client.transact([
+			['add', 2, 'card/column', 'todo'],
+			['add', 2, 'card/order', 1]
+		]);
+		client.transact([
+			['retract', 2, 'card/order', 1],
+			['add', 2, 'card/order', 5]
+		]); // tx 3 — reorders card 2 only
+
+		const at2 = client.atTransaction(2);
+		expect(at2.find({ 'card/column': 'todo' }, { orderBy: ['card/order', 'asc'] }).map((e) => e.id)).toEqual([
+			2, 1
+		]);
+		expect(client.find({ 'card/column': 'todo' }, { orderBy: ['card/order', 'asc'] }).map((e) => e.id)).toEqual([
+			1, 2
+		]);
 	});
 });
 
