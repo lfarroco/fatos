@@ -61,6 +61,19 @@ npm run lint
 npm run types
 ```
 
+### Browser E2E tests
+
+Real-browser tests (Playwright) that boot the demo apps and drive their actual
+UI — see `playwright.config.ts` and `e2e/`.
+
+```bash
+# One-time: install the Playwright browser
+npm run test:e2e:install
+
+# Run the e2e suite (starts the demo app's dev server automatically)
+npm run test:e2e
+```
+
 ## Architecture
 
 ```
