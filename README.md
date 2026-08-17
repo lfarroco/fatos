@@ -23,6 +23,9 @@ Fatos stores application state as immutable facts rather than mutable objects. T
 - **`@fatos/chrome-extension`** - Chrome DevTools integration
 - **`@fatos/schema-designer`** - Visual schema designer with import/export adapters
 - **`@fatos/examples`** - Example applications
+- **`@fatos/app-ops-desk`** - Niche demo #1: audit/operations — fulfillment + inventory with time travel
+- **`@fatos/app-replay`** - Niche demo #2: time-travel debugging — a flow builder with scrub, diff, undo, export
+- **`@fatos/app-liveboard`** - Niche demo #3: realtime collaboration — a multi-client kanban board
 
 ## Quick Start
 
@@ -88,6 +91,9 @@ npm run types
 - [docs/README.md](./docs/README.md) - Package usage guides
 - [docs/client-guide.md](./docs/client-guide.md) - How to use `@fatos/client`
 - [docs/react-guide.md](./docs/react-guide.md) - How to use `@fatos/react`
+- [docs/running-demo-apps.md](./docs/running-demo-apps.md) - How to run the three demo apps
+- [docs/niche-validation.md](./docs/niche-validation.md) - Where Fatos fits (demo-app findings)
+- [docs/niche-gap-tasks.md](./docs/niche-gap-tasks.md) - Task list for the gaps the demos surfaced
 - [PLAN.md](./PLAN.md) - Detailed project plan and design decisions
 
 ## Contributing

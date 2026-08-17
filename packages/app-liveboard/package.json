@@ -1,0 +1,30 @@
+{
+	"name": "@fatos/app-liveboard",
+	"version": "0.0.1",
+	"description": "Niche validation app #3: realtime collaboration — a multi-client kanban board",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "esbuild src/server.ts --bundle --platform=node --format=cjs --outfile=dist/server.cjs && esbuild src/client.tsx --bundle --format=esm --jsx=automatic --outfile=static/app.js",
+		"server": "node dist/server.cjs",
+		"client": "esbuild src/client.tsx --bundle --format=esm --jsx=automatic --outfile=static/app.js --servedir=static --serve=4176",
+		"types": "tsc --noEmit",
+		"lint": "eslint src"
+	},
+	"dependencies": {
+		"@fatos/client": "file:../client",
+		"@fatos/core": "file:../core",
+		"@fatos/persistence": "file:../persistence",
+		"@fatos/react": "file:../react",
+		"@fatos/server": "file:../server",
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"@types/react": "^18.2.0",
+		"@types/react-dom": "^18.2.0",
+		"esbuild": "^0.25.0",
+		"typescript": "^5.3.3"
+	}
+}

@@ -1,0 +1,30 @@
+{
+	"name": "@fatos/app-replay",
+	"version": "0.0.1",
+	"description": "Niche validation app #2: time-travel debugging — a flow builder with scrub, diff, undo, export/import",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "esbuild src/client.tsx --bundle --format=esm --jsx=automatic --outfile=static/app.js",
+		"client": "esbuild src/client.tsx --bundle --format=esm --jsx=automatic --outfile=static/app.js --servedir=static --serve=4175",
+		"types": "tsc --noEmit",
+		"lint": "eslint src",
+		"test": "vitest"
+	},
+	"dependencies": {
+		"@fatos/client": "file:../client",
+		"@fatos/core": "file:../core",
+		"@fatos/devtools": "file:../devtools",
+		"@fatos/react": "file:../react",
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0"
+	},
+	"devDependencies": {
+		"@types/node": "^20.10.0",
+		"@types/react": "^18.2.0",
+		"@types/react-dom": "^18.2.0",
+		"esbuild": "^0.25.0",
+		"typescript": "^5.3.3",
+		"vitest": "^1.0.0"
+	}
+}

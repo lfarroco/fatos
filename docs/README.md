@@ -21,3 +21,12 @@ How Fatos stacks up against the Datalog ecosystem, and what it would take to clo
 
 - [Fatos vs. Datomic vs. DataScript](./comparison-datomic-datascript.md) — positioning, feature-by-feature comparison, advantages, and downsides
 - [Gap Analysis — querying, schema, rules](./gap-analysis-query-schema-rules.md) — itemized gaps with status flags (✅ implemented / 📋 designed / ❌ missing) and a priority roadmap
+
+## Niche Validation
+
+- [Niche validation](./niche-validation.md) — what the three demo apps
+  (`@fatos/app-ops-desk`, `@fatos/app-replay`, `@fatos/app-liveboard`) found
+  about where Fatos fits
+- [Running the demo apps](./running-demo-apps.md) — build/run/troubleshoot the three apps
+- [Niche gap tasks](./niche-gap-tasks.md) — prioritized task list for the gaps the demos surfaced
+- [App design: FieldSync](./app-fieldsync-design.md) — build specification for the planned device/edge state sync demo

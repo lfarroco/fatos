@@ -927,3 +927,85 @@ back to sub-agents for fixes.
   items (`retractEntity`, ref existence enforcement, Datalog find shapes, `:in`,
   aggregates, rules) left as-is.
 
+
+## [2026-08-16] client — G1: client `find` / `at(tx).find` lack core options (orderBy/limit/offset/select)
+- **Task**: G1 in docs/niche-gap-tasks.md — expose `FindOptions` on `FatosClient.find` + `atTransaction(tx).find`, and a `useQuery(criteria, options?)` react overload
+- **Found by**: niche-validation apps (app-liveboard sorts in JS; app-ops-desk ships a sortBy helper)
+- **Severity**: medium
+- **Status**: open
+- **Description**: Core `FactDatabase.find` supports `{ orderBy, limit, offset, select }`; the client wrapper only accepts a tx number, so demo apps reimplement ordering.
+- **Resolution**: —
+
+## [2026-08-16] core — G2: `entity()` returns branded ref objects; design/01 promises plain ids by default
+- **Task**: G2 in docs/niche-gap-tasks.md — `entity(eid, tx?, { refs: 'id' | 'ref' })` defaulting to plain-id unwrapping
+- **Found by**: niche-validation apps (app-replay `refTarget()` unwraps edge refs; devtools graph has the same workaround)
+- **Severity**: medium
+- **Status**: open
+- **Description**: `ref()` values are returned verbatim from entity state; consumers must unwrap via `REF_BRAND`.
+- **Resolution**: —
+
+## [2026-08-16] client — G3: syncing client is read-only; writes need a separate REST helper
+- **Task**: G3 in docs/niche-gap-tasks.md — write methods (`transact`/`add`/`retract`) on `SyncingClient` forwarded over REST to the derived HTTP base
+- **Found by**: niche-validation apps (app-ops-desk and app-liveboard each duplicate src/api.ts `postTransact`)
+- **Severity**: medium
+- **Status**: open
+- **Description**: `createSyncingClient` mirrors the server but cannot write; every write is a REST hop the mirror then replays.
+- **Resolution**: —
+
+## [2026-08-16] core — G4: no timestamp→tx mapping for "state as of <time>"
+- **Task**: G4 in docs/niche-gap-tasks.md — `db.txAtOrBefore(timestamp)` / `db.atTime(timestamp)`
+- **Found by**: niche-validation apps (app-ops-desk README: "stock as of last Tuesday")
+- **Severity**: low
+- **Status**: open
+- **Description**: `at(tx)` is tx-id based; the ledger stores timestamps but no helper maps a wall-clock time to the last tx at-or-before it.
+- **Resolution**: —
+
+## [2026-08-16] react — G5: no first-class as-of read hook (scrub re-renders coarsely)
+- **Task**: G5 in docs/niche-gap-tasks.md — `useQuery(criteria, { asOf })` / `useEntity(eid, { asOf })`
+- **Found by**: niche-validation apps (app-ops-desk `TimeTravelPanel` uses a coarse subscribe+re-read tick)
+- **Severity**: low
+- **Status**: open
+- **Description**: React hooks model only current state; time-travel UIs fall back to manual re-reads.
+- **Resolution**: —
+
+## [2026-08-16] core — G6: convenience for "facts committed by tx N"
+- **Task**: G6 in docs/niche-gap-tasks.md — `db.transactionFacts(tx)` / `db.transaction(tx)`
+- **Found by**: niche-validation apps (app-replay derives step facts from `db.diff(headTx-1, headTx)`)
+- **Severity**: low
+- **Status**: open
+- **Description**: No direct API answers "what did transaction N commit"; consumers reconstruct it from diff.
+- **Resolution**: —
+
+## [2026-08-16] examples — G7: demo follow-ups (reference-app guide, agent-session recorder)
+- **Task**: G7 in docs/niche-gap-tasks.md — extract the Ops Desk reference flow; build an AI-agent session recorder variant of app-replay
+- **Found by**: niche-validation review (docs/niche-validation.md follow-ups)
+- **Severity**: low
+- **Status**: open
+- **Description**: Product-shaped follow-ups beyond the library API gaps.
+- **Resolution**: —
+
+
+## [2026-08-16] client — G8: syncing client can't resume from a restored cache (watermark not derived)
+- **Task**: G8 in docs/niche-gap-tasks.md — derive the initial `afterTx` watermark from `options.client`'s ledger head in `SyncingClient`
+- **Found by**: device/edge sync re-analysis (2026-08-16) — a device with a durable local cache must resume incrementally, not full-pull
+- **Severity**: medium
+- **Status**: open
+- **Description**: `createSyncingClient({ client })` ignores the pre-populated mirror's ledger for the watermark (`lastAppliedTxInternal` stays null), so reconnect always does a full pull + client replacement.
+- **Resolution**: —
+
+## [2026-08-16] core+server — G9: no "facts since <timestamp>" on the wire (afterTime)
+- **Task**: G9 in docs/niche-gap-tasks.md — `db.txAtOrBefore(timestamp)` + `afterTime` on the sync message / `GET /facts?since=`
+- **Found by**: device/edge sync re-analysis (2026-08-16) — "new facts since 01-01-2026" is the natural device catch-up query
+- **Severity**: medium
+- **Status**: open
+- **Description**: Catch-up is only `afterTx` (opaque tx id); no timestamp→tx mapping and no `afterTime` parameter. Depends on G4.
+- **Resolution**: —
+
+## [2026-08-16] client — G10: persisting the syncing mirror (durable local cache)
+- **Task**: G10 in docs/niche-gap-tasks.md — optional `adapter` on `createSyncingClient` that appends applied transactions and restores on start
+- **Found by**: device/edge sync re-analysis (2026-08-16) — the mirror must survive reboots
+- **Severity**: medium
+- **Status**: open
+- **Description**: No built-in persistence of the mirror; applied sync-events must be appended to an adapter manually. Depends on G8.
+- **Resolution**: —
+
