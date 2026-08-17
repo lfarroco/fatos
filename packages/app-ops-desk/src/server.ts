@@ -20,7 +20,10 @@ const host = process.env.HOST ?? '127.0.0.1';
 async function main(): Promise<void> {
 	const dataFile = join(process.cwd(), 'data', 'ops-desk.json');
 	const storage = new FileAdapter(dataFile);
-	const server = createFatosServer({ storage });
+	// The browser client runs on a separate port (esbuild serve, 4174), so the
+	// REST write-through must be reachable cross-origin: opt into any-origin CORS
+	// explicitly (the server default is same-origin only).
+	const server = createFatosServer({ storage, cors: { origin: '*' } });
 
 	const shuttingDown = { value: false };
 	const shutdown = async (signal: string): Promise<void> => {

@@ -86,6 +86,7 @@ every drag with its actor metadata.
 | Client → server address | `?server=ws://host:port/ws` query param (defaults to `localhost` on the app's port) |
 | Server port | `PORT=…` env var (e.g. `PORT=5000 npm run server --workspace @fatos/app-ops-desk`) |
 | Server bind host | `HOST=…` env var (default `127.0.0.1`) |
+| CORS | Defaults to **same-origin only** (`cors` omitted) — the browser apps in this repo opt in explicitly. Each app server passes `cors: { origin: '*' }` because the client and server run on different ports, so the REST write-through preflight is answered for any origin. Restrict with `createFatosServer({ cors: { origin: ['https://app.example'] } })`, disable with `cors: false` |
 | Persistence file | `<package>/data/<app>.json` (+ `.log` append file); delete the `data/` dir to reset the demo |
 
 Note: the client address and the server `PORT` must agree — the browser page

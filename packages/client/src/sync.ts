@@ -442,7 +442,12 @@ export class SyncingClient {
 	constructor(options: SyncingClientOptions) {
 		this.id = `sync-${syncIdCounter++}`;
 		this.httpBaseUrl = httpBaseUrlFromWsUrl(options.url);
-		this.fetchImpl = options.fetch ?? globalThis.fetch;
+		// `globalThis.fetch` is `window.fetch` in the browser, which requires
+		// `this` to be the `Window`. Holding the bare reference and calling it
+		// later would throw "Illegal invocation"; bind the default so the
+		// write-through path works. A caller-supplied `fetch` is used as-is
+		// (the caller owns its `this` binding).
+		this.fetchImpl = options.fetch !== undefined ? options.fetch : globalThis.fetch.bind(globalThis);
 		this.createSocket = options.createSocket ?? (() => defaultCreateSocket(options.url));
 		this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;
 		this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 30000;

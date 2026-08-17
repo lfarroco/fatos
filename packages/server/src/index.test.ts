@@ -1142,3 +1142,121 @@ describe('@fatos/server', () => {
 	});
 });
 
+
+describe('@fatos/server CORS', () => {
+	it('defaults to same-origin: reflects a matching origin, blocks cross-origin', async () => {
+		const server = createFatosServer();
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+		const selfOrigin = `http://${host}:${port}`;
+
+		try {
+			// Same-origin request: the Origin matches the request's Host.
+			const sameOrigin = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: selfOrigin }
+			});
+			expect(sameOrigin.status).toBe(200);
+			expect(sameOrigin.headers.get('access-control-allow-origin')).toBe(selfOrigin);
+
+			// Cross-origin request (the demo client's separate port): no allow-origin.
+			const crossOrigin = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: 'http://localhost:4176' }
+			});
+			expect(crossOrigin.headers.get('access-control-allow-origin')).toBeNull();
+
+			// Cross-origin preflight is also refused (204 but no allow-origin).
+			const preflight = await fetch(`${baseUrl}/transact`, {
+				method: 'OPTIONS',
+				headers: { origin: 'http://localhost:4176' }
+			});
+			expect(preflight.status).toBe(204);
+			expect(preflight.headers.get('access-control-allow-origin')).toBeNull();
+			expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it('treats cors: true as the same-origin default', async () => {
+		const server = createFatosServer({ cors: true });
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			const response = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: 'http://localhost:4176' }
+			});
+			expect(response.headers.get('access-control-allow-origin')).toBeNull();
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it('answers cross-origin preflights and tags responses with origin: "*"', async () => {
+		const server = createFatosServer({ cors: { origin: '*' } });
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			const preflight = await fetch(`${baseUrl}/transact`, {
+				method: 'OPTIONS',
+				headers: { origin: 'http://localhost:4176' }
+			});
+			expect(preflight.status).toBe(204);
+			expect(preflight.headers.get('access-control-allow-origin')).toBe('*');
+			expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+			expect(preflight.headers.get('access-control-allow-headers')).toContain('content-type');
+
+			const post = await fetch(`${baseUrl}/transact`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', origin: 'http://localhost:4176' },
+				body: JSON.stringify({ entries: [['add', 1, 'type', 'user']] })
+			});
+			expect(post.status).toBe(200);
+			expect(post.headers.get('access-control-allow-origin')).toBe('*');
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it('reflects only configured origins and omits the header for others', async () => {
+		const server = createFatosServer({ cors: { origin: ['http://allowed.example'] } });
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			const allowed = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: 'http://allowed.example' }
+			});
+			expect(allowed.status).toBe(200);
+			expect(allowed.headers.get('access-control-allow-origin')).toBe('http://allowed.example');
+
+			const blocked = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: 'http://evil.example' }
+			});
+			expect(blocked.headers.get('access-control-allow-origin')).toBeNull();
+		} finally {
+			await server.stop();
+		}
+	});
+
+	it('omits CORS headers and preflight handling when disabled', async () => {
+		const server = createFatosServer({ cors: false });
+		const { host, port } = await server.start({ port: 0 });
+		const baseUrl = `http://${host}:${port}`;
+
+		try {
+			const response = await fetch(`${baseUrl}/facts`, {
+				headers: { origin: 'http://localhost:4176' }
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get('access-control-allow-origin')).toBeNull();
+
+			const preflight = await fetch(`${baseUrl}/transact`, { method: 'OPTIONS' });
+			expect(preflight.status).toBe(404);
+		} finally {
+			await server.stop();
+		}
+	});
+});
+

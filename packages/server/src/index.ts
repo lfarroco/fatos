@@ -54,6 +54,31 @@ export type StartOptions = {
 	host?: string;
 };
 
+/** CORS configuration for the HTTP API. */
+export type CorsOptions = {
+	/**
+	 * Allowed origins:
+	 * - `'same-origin'` (the default) reflects the `Origin` header only when it
+	 *   matches the server's own host — cross-origin browsers are blocked, so
+	 *   the API is only reachable from pages the server itself serves;
+	 * - `'*'` answers any origin (browsers then never send credentials);
+	 * - any other string or array of strings restricts
+	 *   `access-control-allow-origin` to matching `Origin` headers.
+	 */
+	origin?: string | readonly string[];
+	/** Preflight methods (default `['GET', 'POST', 'OPTIONS']`). */
+	methods?: readonly string[];
+	/** Preflight request headers (default `['content-type']`). */
+	headers?: readonly string[];
+};
+
+/** Normalized internal CORS config. */
+type NormalizedCors = {
+	origin: '*' | 'same-origin' | string[];
+	methods: readonly string[];
+	headers: readonly string[];
+};
+
 /**
  * Construction options for {@link FatosServer}. When `storage` is provided the
  * server seeds its database from the adapter on `start()` and persists the
@@ -62,6 +87,15 @@ export type StartOptions = {
  */
 export type FatosServerOptions = {
 	storage?: StorageAdapter;
+	/**
+	 * Cross-origin access to the HTTP API. Defaults to `'same-origin'` — only
+	 * requests whose `Origin` matches the server's own host are allowed, which
+	 * is what a same-server-served app needs and nothing more. Pass
+	 * `{ origin: '*' }` to open the API to any origin (the demo apps do this —
+	 * their browser clients run on a separate port), an `origin` list to
+	 * restrict, or `false` to disable CORS entirely.
+	 */
+	cors?: boolean | CorsOptions;
 };
 
 export type ServerAddress = {
@@ -123,6 +157,36 @@ function writeJson(res: ServerResponse, statusCode: number, payload: JsonObject)
 	res.statusCode = statusCode;
 	res.setHeader('content-type', 'application/json; charset=utf-8');
 	res.end(JSON.stringify(payload));
+}
+
+/** Normalizes the `cors` option into the internal shape the request path reads. */
+function normalizeCors(cors: boolean | CorsOptions | undefined): NormalizedCors | null {
+	if (cors === false) {
+		return null;
+	}
+
+	const origin =
+		cors === true || cors === undefined || cors.origin === undefined ? 'same-origin' : cors.origin;
+	return {
+		origin:
+			origin === '*' || origin === 'same-origin' ? origin : typeof origin === 'string' ? [origin] : [...origin],
+		methods: cors === true || cors === undefined || cors.methods === undefined ? ['GET', 'POST', 'OPTIONS'] : cors.methods,
+		headers: cors === true || cors === undefined || cors.headers === undefined ? ['content-type'] : cors.headers
+	};
+}
+
+/**
+ * The server's own origin as a browser would derive it for a same-origin
+ * request: `scheme://` + the request's `Host` header (so `localhost:4200`,
+ * `127.0.0.1:4200`, or a reverse-proxied hostname all work).
+ */
+function sameOriginOf(req: IncomingMessage): string | null {
+	const host = req.headers.host;
+	if (typeof host !== 'string' || host === '') {
+		return null;
+	}
+	const encrypted = (req.socket as { encrypted?: boolean }).encrypted === true;
+	return `${encrypted ? 'https' : 'http'}://${host}`;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -274,9 +338,12 @@ export class FatosServer {
 	private clientSubscriptions = new Map<WebSocket, Map<string, ClientSubscription>>();
 	/** Per-client fact-sync registry (Phase 6): subscription id -> unsubscribe. */
 	private syncSubscriptions = new Map<WebSocket, Map<string, { id: string; unsubscribe: Unsubscribe }>>();
+	/** Normalized CORS config; `null` disables CORS headers and OPTIONS handling. */
+	private readonly cors: NormalizedCors | null;
 
 	constructor(options: FatosServerOptions = {}) {
 		this.storage = options.storage ?? null;
+		this.cors = normalizeCors(options.cors);
 	}
 
 	async start(options: StartOptions = {}): Promise<ServerAddress> {
@@ -854,11 +921,58 @@ export class FatosServer {
 		});
 	}
 
+	/**
+	 * Tags a response with the CORS headers implied by the request's `Origin`.
+	 * With `'same-origin'` only requests whose origin matches the server's own
+	 * host are allowed; with an origin allow-list, non-matching origins get no
+	 * `access-control-allow-origin` header, so the browser blocks them. The
+	 * `vary` on Origin keeps shared caches from replaying one origin's headers
+	 * for another.
+	 */
+	private applyCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
+		if (this.cors === null) {
+			return;
+		}
+
+		const configuredOrigin = this.cors.origin;
+		const requestOrigin = req.headers.origin;
+		let allowOrigin: string | null;
+		if (configuredOrigin === '*') {
+			allowOrigin = '*';
+		} else if (configuredOrigin === 'same-origin') {
+			const selfOrigin = sameOriginOf(req);
+			allowOrigin = requestOrigin !== undefined && selfOrigin !== null && requestOrigin === selfOrigin ? requestOrigin : null;
+		} else {
+			allowOrigin =
+				typeof requestOrigin === 'string' && configuredOrigin.includes(requestOrigin) ? requestOrigin : null;
+		}
+
+		if (allowOrigin !== null) {
+			res.setHeader('access-control-allow-origin', allowOrigin);
+		}
+		res.setHeader('access-control-allow-methods', this.cors.methods.join(', '));
+		res.setHeader('access-control-allow-headers', this.cors.headers.join(', '));
+		res.setHeader('vary', 'Origin');
+	}
+
 	private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		try {
 			const method = req.method ?? 'GET';
 			const requestUrl = new URL(req.url ?? '/', 'http://localhost');
 			const pathname = requestUrl.pathname;
+
+			if (this.cors !== null) {
+				this.applyCorsHeaders(req, res);
+				if (method === 'OPTIONS') {
+					// CORS preflight — browsers send this before a cross-origin
+					// `content-type: application/json` POST /transact. Respond
+					// with the allowed origin/methods/headers so the app's
+					// write-through fetch is allowed to proceed.
+					res.statusCode = 204;
+					res.end();
+					return;
+				}
+			}
 
 			if (method === 'GET' && pathname === '/health') {
 				writeJson(res, 200, { status: 'ok' });

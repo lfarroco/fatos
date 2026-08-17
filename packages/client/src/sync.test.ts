@@ -783,6 +783,50 @@ describe('SyncingClient write-through (G3)', () => {
 		expect(result.transaction?.[2]).toEqual({ source: new Date(1000) });
 	});
 
+	it('binds the default globalThis.fetch so a bare call does not throw Illegal invocation', async () => {
+		// Browser regression: `window.fetch` throws "Failed to execute 'fetch'
+		// on 'Window': Illegal invocation" when called with `this` detached from
+		// the global object. The default must be bound to globalThis.
+		const harness = socketHarness();
+		const originalFetch = globalThis.fetch;
+		let invokedWith: unknown = null;
+		globalThis.fetch = (function (this: unknown, url: string, init?: unknown): Promise<Response> {
+			invokedWith = this;
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				json: async (): Promise<unknown> => ({}),
+				text: async (): Promise<string> => ''
+			} as Response);
+		}) as unknown as typeof fetch;
+
+		try {
+			const syncing = createSyncingClient({
+				url: 'ws://test/ws',
+				createSocket: harness.factory
+			});
+			await syncing.transact([['add', 1, 'a', 'x']]);
+			expect(invokedWith).toBe(globalThis);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it('uses an injected fetch verbatim (no rebinding)', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, { facts: [], transaction: null });
+
+		await syncing.transact([['add', 1, 'a', 'x']]);
+		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0]?.url).toBe('http://test/transact');
+	});
+
 	it('wire-tags entry values before POST', async () => {
 		const harness = socketHarness();
 		const fake = fetchHarness();
