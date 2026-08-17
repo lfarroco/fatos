@@ -22,6 +22,18 @@ A companion browser DevTools extension will allow developers to visualize and in
 
 The overall goal is to create a developer experience similar to modern frontend state tools and backend event stores, but built around an immutable temporal fact model.
 
+## Strategic Direction
+
+> **2026-08-16** — the full plan lives in
+> [docs/framework-vision.md](./docs/framework-vision.md).
+
+Fatos is being developed as a **fullstack data framework** in the Django mold:
+models (schema-as-data), migrations, auth, and an auto-generated **temporal
+admin** — over **Postgres** as the production storage backend. The in-memory
+engine remains the client runtime; the broad multi-adapter storage story is
+retired in favor of one real backend (ACID, `LISTEN/NOTIFY` scale-out,
+recursive CTEs for rules, row-level security).
+
 ## Core Data Model
 
 The database stores information as immutable facts.
@@ -439,6 +451,15 @@ packages/
 - [x] Add relationship editing flow (one-to-one, one-to-many, many-to-many)
 - [x] Integrate file import/export UI in DevTools panel
 - [x] Add round-trip import/export + adapter test fixtures
+
+### Phase 8: Framework (Django-style data framework)
+
+Tracked in [docs/framework-vision.md](docs/framework-vision.md).
+
+- [ ] Postgres engine — facts/ledger/current-state tables, tx-atomic append,
+      time-travel queries, `LISTEN/NOTIFY` fan-out
+- [ ] DX core — schema → type codegen, migration/backfill tooling, drift check
+- [ ] Temporal admin — auto CRUD + time travel + diff + undo + audit, schema tab
 
 ### Performance hardening (server)
 

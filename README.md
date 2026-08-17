@@ -94,7 +94,9 @@ npm run types
 - [docs/running-demo-apps.md](./docs/running-demo-apps.md) - How to run the three demo apps
 - [docs/niche-validation.md](./docs/niche-validation.md) - Where Fatos fits (demo-app findings)
 - [docs/niche-gap-tasks.md](./docs/niche-gap-tasks.md) - Task list for the gaps the demos surfaced
+- [docs/framework-vision.md](./docs/framework-vision.md) - Framework direction: Django-style data framework, temporal admin, Postgres backend
 - [PLAN.md](./PLAN.md) - Detailed project plan and design decisions
+- [tasks.md](./tasks.md) - Work items for the framework direction and open gaps
 
 ## Contributing
 

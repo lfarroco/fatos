@@ -37,3 +37,10 @@ DevTools — the properties that justify the whole project.
    reference.
 4. **Reactivity is dependency-based.** A reactive read re-evaluates only when facts
    relevant to it change, not on every transaction.
+
+## Next-phase direction
+
+The framework pivot (Django-style data framework, temporal admin, Postgres
+backend) is documented in [framework-vision.md](../framework-vision.md). It
+extends this API series and supersedes the storage-flexibility decision in
+[04-phasing.md](./04-phasing.md).
