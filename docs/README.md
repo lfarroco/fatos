@@ -31,6 +31,12 @@ How Fatos stacks up against the Datalog ecosystem, and what it would take to clo
 - [Niche gap tasks](./niche-gap-tasks.md) — prioritized task list for the gaps the demos surfaced
 - [App design: FieldSync](./app-fieldsync-design.md) — build specification for the planned device/edge state sync demo
 
+## Examples
+
+- [Networked game example design](./networked-game-design.md) — build spec for a
+  two-player turn-based game (tic-tac-toe) over the shared fact log: moves as
+  transactions, live sync, replay/undo
+
 ## Framework Direction
 
 - [Framework vision](./framework-vision.md) — Fatos as a fullstack *data*
