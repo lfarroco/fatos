@@ -11,18 +11,23 @@
 
 import {
 	createDatabase,
+	type DatabaseSnapshot,
+	type DiffResult,
 	type EntityId,
 	type EntityReadOptions,
 	type Fact,
 	type FactTuple,
 	type FactDatabase,
 	type FindOptions,
+	type InsertMap,
 	type LiveQueryOptions,
 	type LiveQueryResult,
 	type LiveResult,
+	type MergeMap,
 	type Mutation,
 	type OrderBy,
 	type OrderDirection,
+	type PullPath,
 	type QuerySpec,
 	type QueryTerm,
 	type SchemaInfo,
@@ -94,11 +99,20 @@ function isStringArray(value: unknown): value is readonly string[] {
 }
 
 export class FatosClient extends EventTarget {
-	private db: FactDatabase;
+	private dbInternal: FactDatabase;
 
 	constructor(db?: FactDatabase) {
 		super();
-		this.db = db ?? createDatabase();
+		this.dbInternal = db ?? createDatabase();
+	}
+
+	/**
+	 * The underlying core database. The client surface is the complete
+	 * authoring/reading API and emits events for every write, so prefer the
+	 * client methods; this handle is for advanced use (e.g. sync planning).
+	 */
+	get db(): FactDatabase {
+		return this.dbInternal;
 	}
 
 	/**
@@ -127,7 +141,7 @@ export class FatosClient extends EventTarget {
 			);
 		}
 
-		const transactions = this.db.getTransactions();
+		const transactions = this.dbInternal.getTransactions();
 		const transaction = transactions[transactions.length - 1];
 		if (transaction !== undefined) {
 			this.dispatchEvent(new TransactionEvent(transaction, facts));
@@ -140,9 +154,9 @@ export class FatosClient extends EventTarget {
 		let fact: Fact;
 		if (Array.isArray(eidOrTuple)) {
 			const tuple = eidOrTuple as FactTuple;
-			fact = this.db.add(tuple);
+			fact = this.dbInternal.add(tuple);
 		} else {
-			fact = this.db.add(eidOrTuple as EntityId, attribute as string, value);
+			fact = this.dbInternal.add(eidOrTuple as EntityId, attribute as string, value);
 		}
 		this.emitCommitted([fact]);
 		return fact;
@@ -154,64 +168,130 @@ export class FatosClient extends EventTarget {
 		let fact: Fact;
 		if (Array.isArray(eidOrTuple)) {
 			const tuple = eidOrTuple as FactTuple;
-			fact = this.db.retract(tuple);
+			fact = this.dbInternal.retract(tuple);
 		} else {
-			fact = this.db.retract(eidOrTuple as EntityId, attribute as string, value);
+			fact = this.dbInternal.retract(eidOrTuple as EntityId, attribute as string, value);
 		}
 		this.emitCommitted([fact]);
 		return fact;
 	}
 
 	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
-		const facts = this.db.transact(entries, metadata);
+		const facts = this.dbInternal.transact(entries, metadata);
 		this.emitCommitted(facts);
 		return facts;
 	}
 
+	insert(input: InsertMap): EntityId;
+	insert(input: InsertMap[]): EntityId[];
+	insert(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		return this.insertMaps(input);
+	}
+
+	upsert(input: InsertMap): EntityId;
+	upsert(input: InsertMap[]): EntityId[];
+	upsert(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		return this.insertMaps(input);
+	}
+
+	/** Object-map authoring (design/02): commits a `planInsert` plan through the event path. */
+	private insertMaps(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		const plan = this.dbInternal.planInsert(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return Array.isArray(input) ? plan.results : plan.results[0];
+	}
+
+	set(eid: EntityId, attribute: string, value: unknown): Fact[];
+	set(eid: EntityId, changes: Record<string, unknown>): Fact[];
+	set(eid: EntityId, attributeOrChanges: string | Record<string, unknown>, value?: unknown): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, value);
+	}
+
+	patch(eid: EntityId, attribute: string, value: unknown): Fact[];
+	patch(eid: EntityId, changes: Record<string, unknown>): Fact[];
+	patch(eid: EntityId, attributeOrChanges: string | Record<string, unknown>, value?: unknown): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, value);
+	}
+
+	/** Diff-based update (design/02): commits the `planSet` diff through the event path. */
+	private applyChanges(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		value?: unknown
+	): Fact[] {
+		const mutations =
+			typeof attributeOrChanges === 'string'
+				? this.dbInternal.planSet(eid, attributeOrChanges, value)
+				: this.dbInternal.planSet(eid, attributeOrChanges);
+		if (mutations.length === 0) {
+			return [];
+		}
+		return this.transact(mutations);
+	}
+
+	merge(input: MergeMap): EntityId[] {
+		const plan = this.dbInternal.planMerge(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return plan.results;
+	}
+
+	/** Single-entity form of {@link merge}; accepts numeric or string ids. */
+	mergeEntity(eid: EntityId, attrs: InsertMap): EntityId {
+		const plan = this.dbInternal.planMergeEntity(eid, attrs);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return plan.results[0];
+	}
+
 	getFacts(): readonly Fact[] {
-		return this.db.getFacts();
+		return this.dbInternal.getFacts();
 	}
 
 	getFactsByEntity(eid: EntityId): readonly Fact[] {
-		return this.db.getFactsByEntity(eid);
+		return this.dbInternal.getFactsByEntity(eid);
 	}
 
 	getFactsByAttribute(attribute: string): readonly Fact[] {
-		return this.db.getFactsByAttribute(attribute);
+		return this.dbInternal.getFactsByAttribute(attribute);
 	}
 
 	getFactsByEntityAttribute(eid: EntityId, attribute: string): readonly Fact[] {
-		return this.db.getFactsByEntityAttribute(eid, attribute);
+		return this.dbInternal.getFactsByEntityAttribute(eid, attribute);
 	}
 
 	getFactsByAttributeValue(attribute: string, value: unknown): readonly Fact[] {
-		return this.db.getFactsByAttributeValue(attribute, value);
+		return this.dbInternal.getFactsByAttributeValue(attribute, value);
 	}
 
 	getTransactions(): readonly TransactionRecord[] {
-		return this.db.getTransactions();
+		return this.dbInternal.getTransactions();
 	}
 
 	/** The facts committed in transaction `tx` (empty when `tx` is unknown). */
 	transactionFacts(tx: number): Fact[] {
-		return this.db.transactionFacts(tx);
+		return this.dbInternal.transactionFacts(tx);
 	}
 
 	/** The transaction ledger record for `tx`, or null when unknown. */
 	transaction(tx: number): TransactionRecord | null {
-		return this.db.transaction(tx);
+		return this.dbInternal.transaction(tx);
 	}
 
 	getSchema(ident: string): SchemaInfo | null {
-		return this.db.getSchema(ident);
+		return this.dbInternal.getSchema(ident);
 	}
 
 	getSchemas(): SchemaInfo[] {
-		return this.db.getSchemas();
+		return this.dbInternal.getSchemas();
 	}
 
 	entity(eid: EntityId, tx?: number, options?: EntityReadOptions): EntityState | null {
-		return this.db.entity(eid, tx, options) as EntityState | null;
+		return this.dbInternal.entity(eid, tx, options) as EntityState | null;
 	}
 
 	/**
@@ -220,11 +300,29 @@ export class FatosClient extends EventTarget {
 	 * (`orderBy` / `limit` / `offset` / `select`).
 	 */
 	find(criteria: Record<string, unknown>, options?: number | FindOptions): EntityState[] {
-		return this.db.find(criteria, options) as EntityState[];
+		return this.dbInternal.find(criteria, options) as EntityState[];
 	}
 
 	query(spec: QuerySpec, tx?: number): QueryTerm[][] {
-		return this.db.query(spec, tx);
+		return this.dbInternal.query(spec, tx);
+	}
+
+	/** Dot-path selection (design/02 pull): resolves ref attributes into nested objects. */
+	pull(eid: EntityId, paths: PullPath, tx?: number): EntityState | null {
+		return this.dbInternal.pull(eid, paths, tx);
+	}
+
+	/**
+	 * The facts committed in transactions (min(txA, txB), max(txA, txB)],
+	 * grouped by operation — the primitive for DevTools timelines and undo/redo.
+	 */
+	diff(txA: number, txB: number): DiffResult {
+		return this.dbInternal.diff(txA, txB);
+	}
+
+	/** Replaces the whole database state with a snapshot (core `restore`). */
+	restore(snapshot: DatabaseSnapshot): void {
+		this.dbInternal.restore(snapshot);
 	}
 
 	/**
@@ -246,21 +344,21 @@ export class FatosClient extends EventTarget {
 		if (typeof input === 'function') {
 			// Access-tracking form: pass the client through (design/03); the
 			// core tracker records the delegated db reads underneath.
-			return this.db.live(() => input(this));
+			return this.dbInternal.live(() => input(this));
 		}
 
 		if (isStringArray(input)) {
 			if (fn === undefined) {
 				throw new Error('live(deps, fn) requires a selector function');
 			}
-			return this.db.live(input, fn);
+			return this.dbInternal.live(input, fn);
 		}
 
 		if (isQuerySpec(input)) {
-			return this.db.live(input);
+			return this.dbInternal.live(input);
 		}
 
-		return this.db.live(input);
+		return this.dbInternal.live(input);
 	}
 
 	/**
@@ -275,16 +373,32 @@ export class FatosClient extends EventTarget {
 		input: QuerySpec | Record<string, unknown>,
 		options?: LiveQueryOptions
 	): LiveQueryResult<T> | LiveQueryResult<QueryTerm[][]> | LiveQueryResult<EntityState[]> {
-		return this.db.liveQuery(input, options);
+		return this.dbInternal.liveQuery(input, options);
 	}
 
-	atTransaction(tx: number) {
+	atTransaction(tx: number): {
+		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
+	} {
 		return {
 			entity: (eid: EntityId, options?: EntityReadOptions) => this.entity(eid, tx, options),
 			find: (criteria: Record<string, unknown>, options?: FindOptions) =>
 				this.find(criteria, { ...options, tx }),
-			query: (spec: QuerySpec) => this.query(spec, tx)
+			query: (spec: QuerySpec) => this.query(spec, tx),
+			pull: (eid: EntityId, paths: PullPath) => this.pull(eid, paths, tx)
 		};
+	}
+
+	/** Time-travel read view alias of {@link atTransaction} (core parity). */
+	at(tx: number): {
+		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
+		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
+		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
+	} {
+		return this.atTransaction(tx);
 	}
 
 	/**
@@ -293,7 +407,7 @@ export class FatosClient extends EventTarget {
 	 * travel by time).
 	 */
 	txAtOrBefore(timestamp: number): number {
-		return this.db.txAtOrBefore(timestamp);
+		return this.dbInternal.txAtOrBefore(timestamp);
 	}
 
 	/**
@@ -304,8 +418,9 @@ export class FatosClient extends EventTarget {
 		entity: (eid: EntityId, options?: EntityReadOptions) => EntityState | null;
 		find: (criteria: Record<string, unknown>, options?: FindOptions) => EntityState[];
 		query: (spec: QuerySpec) => QueryTerm[][];
+		pull: (eid: EntityId, paths: PullPath) => EntityState | null;
 	} {
-		return this.atTransaction(this.db.txAtOrBefore(timestamp));
+		return this.atTransaction(this.dbInternal.txAtOrBefore(timestamp));
 	}
 
 	/**
@@ -316,7 +431,7 @@ export class FatosClient extends EventTarget {
 	 * result diff, so the callback is only invoked on relevant changes.
 	 */
 	observe(criteria: Record<string, unknown>, callback: (entities: EntityState[]) => void): Unsubscribe {
-		const live = this.db.live(criteria);
+		const live = this.dbInternal.live(criteria);
 		callback(live.current);
 		live.subscribe(callback);
 		return () => live.dispose();
@@ -327,7 +442,7 @@ export class FatosClient extends EventTarget {
 	 * on `db.live(spec)`, whose where-clause attributes narrow relevance.
 	 */
 	observeQuery(spec: QuerySpec, callback: (rows: QueryTerm[][]) => void): Unsubscribe {
-		const live = this.db.live(spec);
+		const live = this.dbInternal.live(spec);
 		callback(live.current);
 		live.subscribe(callback);
 		return () => live.dispose();
@@ -342,7 +457,7 @@ export class FatosClient extends EventTarget {
 	 * write and the callback fires only when the entity actually changed.
 	 */
 	observeEntity(eid: EntityId, callback: (entity: EntityState | null) => void): Unsubscribe {
-		const live = this.db.live(() => this.entity(eid));
+		const live = this.dbInternal.live(() => this.entity(eid));
 		callback(live.current);
 		live.subscribe(callback);
 		return () => live.dispose();
@@ -391,18 +506,23 @@ export type {
 } from './sync';
 
 export type {
+	DatabaseSnapshot,
+	DiffResult,
 	EntityId,
 	EntityReadOptions,
 	Fact,
 	FactTuple,
 	FactDatabase,
 	FindOptions,
+	InsertMap,
 	LiveQueryOptions,
 	LiveQueryResult,
 	LiveResult,
+	MergeMap,
 	Mutation,
 	OrderBy,
 	OrderDirection,
+	PullPath,
 	QuerySpec,
 	QueryTerm,
 	SchemaInfo,

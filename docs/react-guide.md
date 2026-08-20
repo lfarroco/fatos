@@ -42,6 +42,35 @@ createRoot(document.getElementById('root')!).render(
 - `useDatalogQuery(spec)` for Datalog query rows
 - `useEntity(eid)` for one entity by id
 - `useTransaction()` for transaction history
+- `useSyncedClient(url, options?)` for a server-backed client in one hook
+
+### useSyncedClient
+
+For apps that mirror a Fatos server, `useSyncedClient` creates and manages a
+`SyncingClient` and mirrors its lifecycle into React state — no manual wiring:
+
+```tsx
+import { useSyncedClient, FatosProvider } from '@fatos/react';
+
+function App() {
+  const { client, sync, status, error } = useSyncedClient('ws://localhost:4100/ws');
+  if (client === null || sync === null) {
+    return <p>Connecting…</p>;
+  }
+
+  return (
+    <FatosProvider client={client}>
+      <InventoryPanel sync={sync} status={status} error={error} />
+    </FatosProvider>
+  );
+}
+```
+
+`client` is the live local mirror (use it with the data hooks), `sync` is the
+write-through handle (`sync.transact`, `sync.insert`, `sync.set`, `sync.merge`),
+`status` tracks connection state, and `error` holds the latest failure. The
+hook calls `start()` on mount and `stop()` on unmount; only the `url` (or an
+unmount/remount) re-creates the connection.
 
 ## useQuery example
 

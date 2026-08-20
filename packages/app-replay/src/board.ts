@@ -6,36 +6,28 @@
  * for free the things a "replay / undo / scrub" UI usually needs bespoke
  * engineering for:
  *
- * - `db.at(tx)` — reconstruct the board at any point in the session,
- * - `db.diff(txA, txB)` — what exactly changed in one step (the inverse is an
- *   undo that keeps history instead of erasing it),
+ * - `client.at(tx)` — reconstruct the board at any point in the session,
+ * - `client.diff(txA, txB)` — what exactly changed in one step (the inverse is
+ *   an undo that keeps history instead of erasing it),
  * - `ref()` — edges between node entities are real graph references,
- * - `db.set` — retract+add update helper for move/rename,
+ * - `client.set` — retract+add update helper for move/rename,
  * - snapshot export/import via the core wire tags.
  *
- * The db and client are created together so the React layer can use the
- * `FatosClient` surface (hooks, observers) while the app logic still reaches
- * the core `FactDatabase` methods (at/diff/set/restore).
+ * The `FatosClient` is the complete surface — the app logic and the React layer
+ * share one handle, and every write flows through the same event path.
  */
 import { createClient, type FatosClient } from '@fatos/client';
 import {
-	createDatabase,
 	deserializeValue,
 	ref,
 	serializeValue,
 	type DiffResult,
 	type EntityId,
 	type Fact,
-	type FactDatabase,
 	type FactOperation,
 	type Mutation,
 	type TransactionRecord
 } from '@fatos/core';
-
-export type BoardDb = {
-	db: FactDatabase;
-	client: FatosClient;
-};
 
 export type BoardNode = {
 	id: EntityId;
@@ -56,33 +48,33 @@ export type UserAction = {
 	inverse: Mutation[];
 };
 
-/** Creates a fresh board: schema declared as facts, then the client wrapping it. */
-export function createBoard(): BoardDb {
-	const db = createDatabase();
-	db.transact([
+/** Creates a fresh board: schema declared as facts on a new client. */
+export function createBoard(): FatosClient {
+	const client = createClient();
+	client.transact([
 		{ ident: 'node/label', valueType: 'string', cardinality: 'one' },
 		{ ident: 'node/x', valueType: 'number', cardinality: 'one' },
 		{ ident: 'node/y', valueType: 'number', cardinality: 'one' },
 		{ ident: 'edge/from', valueType: 'ref', cardinality: 'one' },
 		{ ident: 'edge/to', valueType: 'ref', cardinality: 'one' }
 	]);
-	return { db, client: createClient(db) };
+	return client;
 }
 
 /** The highest committed transaction id (0 when the log is empty). */
-export function headTx(db: FactDatabase): number {
-	const transactions = db.getTransactions();
+export function headTx(client: FatosClient): number {
+	const transactions = client.getTransactions();
 	return transactions.length === 0 ? 0 : transactions[transactions.length - 1][0];
 }
 
 /**
- * Reads the board as of a transaction. `tx === head` reads the live database;
- * anything earlier goes through `db.at(tx)` — the temporal read primitive.
+ * Reads the board as of a transaction. `tx === head` reads the live client;
+ * anything earlier goes through `client.at(tx)` — the temporal read primitive.
  * `ref()`-typed reads (`edge/from`, `edge/to`) come back as plain entity ids
  * by default (design/01), so no unwrapping is needed here.
  */
-export function readBoardAt(db: FactDatabase, tx: number): { nodes: BoardNode[]; edges: BoardEdge[] } {
-	const view = tx === headTx(db) ? db : db.at(tx);
+export function readBoardAt(client: FatosClient, tx: number): { nodes: BoardNode[]; edges: BoardEdge[] } {
+	const view = tx === headTx(client) ? client : client.at(tx);
 	const nodeEntities = view.find({ 'node/label': { $exists: true } });
 	const edgeEntities = view.find({ 'edge/from': { $exists: true } });
 
@@ -112,10 +104,10 @@ function isEntityId(value: unknown): value is EntityId {
 let actionSeq = 0;
 
 /** Adds a node at (x, y); returns the new entity id. */
-export function addNode(db: FactDatabase, x: number, y: number): EntityId {
+export function addNode(client: FatosClient, x: number, y: number): EntityId {
 	actionSeq += 1;
 	const id = `node-${Date.now().toString(36)}-${actionSeq.toString(36)}`;
-	db.transact(
+	client.transact(
 		[
 			['add', id, 'node/label', 'Node'],
 			['add', id, 'node/x', x],
@@ -126,22 +118,21 @@ export function addNode(db: FactDatabase, x: number, y: number): EntityId {
 	return id;
 }
 
-/** Moves a node — `db.set` computes the retract+add pair in one transaction. */
-export function moveNode(db: FactDatabase, id: EntityId, x: number, y: number): void {
-	db.set(id, { 'node/x': x, 'node/y': y });
+/** Moves a node — `client.set` computes the retract+add pair in one transaction. */
+export function moveNode(client: FatosClient, id: EntityId, x: number, y: number): void {
+	client.set(id, { 'node/x': x, 'node/y': y });
 }
 
-
 /** Renames a node — same update path as move. */
-export function renameNode(db: FactDatabase, id: EntityId, label: string): void {
-	db.set(id, { 'node/label': label });
+export function renameNode(client: FatosClient, id: EntityId, label: string): void {
+	client.set(id, { 'node/label': label });
 }
 
 /** Connects two nodes with a directed edge stored as `ref()` facts. */
-export function addEdge(db: FactDatabase, from: EntityId, to: EntityId): void {
+export function addEdge(client: FatosClient, from: EntityId, to: EntityId): void {
 	actionSeq += 1;
 	const id = `edge-${Date.now().toString(36)}-${actionSeq.toString(36)}`;
-	db.transact(
+	client.transact(
 		[
 			['add', id, 'edge/from', ref(from)],
 			['add', id, 'edge/to', ref(to)]
@@ -151,28 +142,28 @@ export function addEdge(db: FactDatabase, from: EntityId, to: EntityId): void {
 }
 
 /** Deletes a node and any edge touching it (all retracts in one transaction). */
-export function deleteNode(db: FactDatabase, id: EntityId): void {
+export function deleteNode(client: FatosClient, id: EntityId): void {
 	const entries: Mutation[] = [];
-	for (const fact of db.getFactsByEntity(id)) {
+	for (const fact of client.getFactsByEntity(id)) {
 		if (fact[4] === 'add') {
 			entries.push(['retract', fact[0], fact[1], fact[2]]);
 		}
 	}
 
-	for (const edge of db.find({ 'edge/from': { $exists: true } })) {
+	for (const edge of client.find({ 'edge/from': { $exists: true } })) {
 		const from = edge['edge/from'];
 		const to = edge['edge/to'];
 		if (from !== id && to !== id) {
 			continue;
 		}
-		for (const fact of db.getFactsByEntity(edge.id)) {
+		for (const fact of client.getFactsByEntity(edge.id)) {
 			if (fact[4] === 'add') {
 				entries.push(['retract', fact[0], fact[1], fact[2]]);
 			}
 		}
 	}
 
-	db.transact(entries, { app: 'replay', action: 'node:delete' });
+	client.transact(entries, { app: 'replay', action: 'node:delete' });
 }
 
 /**
@@ -197,17 +188,17 @@ export type BoardSnapshot = {
 };
 
 /** Serializes the whole fact log to a JSON snapshot (values wire-tagged). */
-export function exportSnapshot(db: FactDatabase): string {
+export function exportSnapshot(client: FatosClient): string {
 	const payload: BoardSnapshot = {
 		version: 1,
-		facts: db.getFacts().map((fact) => [fact[0], fact[1], serializeValue(fact[2]), fact[3], fact[4]]),
-		transactions: db.getTransactions().map(([tx, timestamp, metadata]) => [tx, timestamp, metadata])
+		facts: client.getFacts().map((fact) => [fact[0], fact[1], serializeValue(fact[2]), fact[3], fact[4]]),
+		transactions: client.getTransactions().map(([tx, timestamp, metadata]) => [tx, timestamp, metadata])
 	};
 	return JSON.stringify(payload, null, 2);
 }
 
-/** Restores a board from a snapshot — a brand-new database + client. */
-export function importSnapshot(text: string): BoardDb {
+/** Restores a board from a snapshot — a brand-new client rebuilt with `restore`. */
+export function importSnapshot(text: string): FatosClient {
 	let payload: BoardSnapshot;
 	try {
 		payload = JSON.parse(text) as BoardSnapshot;
@@ -223,7 +214,7 @@ export function importSnapshot(text: string): BoardDb {
 		return [eid, attribute, deserializeValue(value), tx, op] as Fact;
 	});
 
-	const db = createDatabase();
-	db.restore({ facts, transactions: payload.transactions });
-	return { db, client: createClient(db) };
+	const client = createClient();
+	client.restore({ facts, transactions: payload.transactions });
+	return client;
 }

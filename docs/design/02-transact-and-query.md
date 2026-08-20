@@ -1,6 +1,8 @@
 # 02 — Transact & Query: JS-Native Authoring and Reading
 
-Status: **Approved — not yet implemented.**
+Status: **Approved — implemented** (object maps, refs/upserts, `set`/`patch`
+diffs, `find` operators, `pull`, and now `merge` are shipped on both the core
+database and the `FatosClient`).
 
 ## Guiding principle
 
@@ -91,6 +93,26 @@ db.patch(aliceId, { 'user/name': 'Alicia', 'user/age': null }); // null = retrac
   one transaction.
 - Deleting a many-valued item = `retract`; deleting a one-valued attribute = `set(attr,
   null)` / `patch` with null.
+
+### 4b. Merge (eid-keyed reconcile)
+
+```ts
+db.merge({
+  'user:2': { 'user/name': 'Roberta', 'user/age': 33 },
+  'order:1': { 'order/item': ref(aliceId), 'order/status': 'placed' }
+});
+db.mergeEntity(7, { 'user/name': 'Seven' });   // single form; numeric or string ids
+```
+
+- Keys are entity ids; attribute maps reconcile against current state (`set`
+  semantics) and expand new values like `insert` (arrays → cardinality-many,
+  nested objects → ref entities, fresh attributes auto-declared).
+- Distinct from `insert` (create-oriented, throws on a changed one-value) and
+  `upsert` (resolves by `unique: 'identity'` attribute).
+- `merge` keys are strings (JSON ingestion); numeric ids use `mergeEntity`.
+- One transaction for the whole map; returns entity ids aligned to input order.
+- The side-effect-free planners (`planInsert` / `planSet` / `planMerge`) power
+  the write-through sugar on `SyncingClient` and `FatosServer`.
 
 ## Temp resolution rules
 

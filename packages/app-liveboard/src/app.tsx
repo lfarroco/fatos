@@ -10,17 +10,16 @@
  * and each column subscribes to its own slice (`card/column`), so a move only
  * wakes the columns that actually changed.
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { DragEvent as ReactDragEvent, ReactElement } from 'react';
+import { type EntityState, type SyncStatus, type SyncingClient } from '@fatos/client';
 import {
-	createSyncingClient,
-	type EntityState,
-	type FatosClient,
-	type SyncStatus,
-	type SyncingClient,
-	type TransactionEntryInput
-} from '@fatos/client';
-import { FatosProvider, useFatosClient, useQuery, useTransaction } from '@fatos/react';
+	FatosProvider,
+	useFatosClient,
+	useQuery,
+	useSyncedClient,
+	useTransaction
+} from '@fatos/react';
 
 const DEFAULT_WS_URL = 'ws://localhost:4200/ws';
 
@@ -33,33 +32,6 @@ const COLUMNS: Array<{ id: string; label: string }> = [
 function defaultServerUrl(): string {
 	const params = new URLSearchParams(window.location.search);
 	return params.get('server') ?? DEFAULT_WS_URL;
-}
-
-function useSyncedClient(url: string): {
-	client: FatosClient | null;
-	sync: SyncingClient | null;
-	status: SyncStatus;
-	error: Error | null;
-} {
-	const [client, setClient] = useState<FatosClient | null>(null);
-	const [sync, setSync] = useState<SyncingClient | null>(null);
-	const [status, setStatus] = useState<SyncStatus>('idle');
-	const [error, setError] = useState<Error | null>(null);
-
-	useEffect(() => {
-		const sync = createSyncingClient({
-			url,
-			onStatusChange: (next) => setStatus(next),
-			onError: (next) => setError(next),
-			onClientReplaced: (next) => setClient(next)
-		});
-		setClient(sync.client);
-		setSync(sync);
-		sync.start();
-		return () => sync.stop();
-	}, [url]);
-
-	return { client, sync, status, error };
 }
 
 function Card({ card }: { card: EntityState }): ReactElement {
@@ -114,20 +86,14 @@ function Column({
 			return;
 		}
 
+		// `sync.set` diffs against the mirror: unchanged attributes are not
+		// written, so a drop that moves nothing POSTs nothing.
 		const order = cards.length;
-		const entries: TransactionEntryInput[] = [];
-		if (card['card/column'] !== column.id) {
-			entries.push(['retract', id, 'card/column', card['card/column']]);
-			entries.push(['add', id, 'card/column', column.id]);
-		}
-		if (card['card/order'] !== order) {
-			entries.push(['retract', id, 'card/order', card['card/order']]);
-			entries.push(['add', id, 'card/order', order]);
-		}
-		if (entries.length === 0) {
-			return;
-		}
-		void sync.transact(entries, { actor: 'liveboard-user', action: 'card:move', toColumn: column.id });
+		void sync.set(
+			id,
+			{ 'card/column': column.id, 'card/order': order },
+			{ actor: 'liveboard-user', action: 'card:move', toColumn: column.id }
+		);
 	};
 
 	return (
@@ -160,12 +126,8 @@ function AddCard({ sync }: { sync: SyncingClient }): ReactElement {
 			return;
 		}
 		const id = `card-${Date.now().toString(36)}`;
-		void sync.transact(
-			[
-				['add', id, 'card/title', trimmed],
-				['add', id, 'card/column', 'todo'],
-				['add', id, 'card/order', 0]
-			],
+		void sync.insert(
+			{ id, 'card/title': trimmed, 'card/column': 'todo', 'card/order': 0 },
 			{ actor: 'liveboard-user', action: 'card:add' }
 		);
 		setTitle('');

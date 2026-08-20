@@ -168,8 +168,20 @@ export type EntityReadOptions = {
 	refs?: 'id' | 'ref';
 };
 
-/** A plain attribute map accepted by `insert`/`upsert`; `id` is optional. */
+/** A plain attribute map accepted by `insert`/`upsert`/`merge`; `id` is optional. */
 export type InsertMap = Record<string, unknown>;
+
+/** eid-keyed attribute maps for `merge` (design/02 object grammar). */
+export type MergeMap = Record<string, InsertMap>;
+
+/**
+ * A side-effect-free write plan: the transaction entries an authoring method
+ * would commit, plus the resolved entity ids aligned to the input.
+ */
+export type MergePlan = {
+	entries: TransactionEntryInput[];
+	results: EntityId[];
+};
 
 /** Whitespace-separated dot-paths or an explicit string array (design/02 pull). */
 export type PullPath = string | string[];
@@ -1247,14 +1259,25 @@ export class FactDatabase {
 		return this.insertMaps(input);
 	}
 
-	/**
-	 * Object-map authoring (design/02): flattens nested graphs depth-first /
-	 * parent-major, expands arrays into cardinality-many facts, auto-declares
-	 * schema for array / nested-ref attributes, and resolves `db/unique:
-	 * 'identity'` attributes to existing entities (upsert). Returns resolved
-	 * entity ids aligned to the input maps.
-	 */
+	/** Commits a `planInsert` plan (the shared implementation of `insert`/`upsert`). */
 	private insertMaps(input: InsertMap | InsertMap[]): EntityId | EntityId[] {
+		const plan = this.planInsert(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return Array.isArray(input) ? plan.results : plan.results[0];
+	}
+
+	/**
+	 * Side-effect-free plan for the object-map authoring grammar (design/02):
+	 * flattens nested graphs depth-first / parent-major, expands arrays into
+	 * cardinality-many facts, auto-declares schema for array / nested-ref
+	 * attributes, and resolves `db/unique: 'identity'` attributes to existing
+	 * entities (upsert). Returns the schema declarations + mutations `insert`
+	 * would commit (nothing is written) and the resolved entity ids aligned to
+	 * the input maps.
+	 */
+	planInsert(input: InsertMap | InsertMap[]): MergePlan {
 		const maps = Array.isArray(input) ? input : [input];
 		const tempids = new Map<string, number>();
 		const identityMap = new Map<string, EntityId>();
@@ -1270,12 +1293,7 @@ export class FactDatabase {
 			this.flattenMap(map, eid, tempids, identityMap, mutations, declared);
 		}
 
-		const entries: TransactionEntryInput[] = [...declared.values(), ...mutations];
-		if (entries.length > 0) {
-			this.transact(entries);
-		}
-
-		return Array.isArray(input) ? results : results[0];
+		return { entries: [...declared.values(), ...mutations], results };
 	}
 
 	/**
@@ -1549,17 +1567,15 @@ export class FactDatabase {
 	}
 
 	/**
-	 * Diff-based update (design/02): compares the requested attribute values
-	 * against the entity's current state and emits retract+add pairs in one
-	 * transaction. `null` means retract. Cardinality-many attributes diff as
-	 * sets (arrays replace the member set, scalars replace it with one member);
-	 * one-valued attributes retract-then-add on change.
+	 * Side-effect-free plan for `set` / `patch` (design/02): the retract+add
+	 * mutation diff an update would commit, without committing. `null` means
+	 * retract. Cardinality-many attributes diff as sets (arrays replace the
+	 * member set, scalars replace it with one member); one-valued attributes
+	 * retract-then-add on change.
 	 */
-	private applyChanges(
-		eid: EntityId,
-		attributeOrChanges: string | Record<string, unknown>,
-		value?: unknown
-	): Fact[] {
+	planSet(eid: EntityId, attribute: string, value: unknown): Mutation[];
+	planSet(eid: EntityId, changes: Record<string, unknown>): Mutation[];
+	planSet(eid: EntityId, attributeOrChanges: string | Record<string, unknown>, value?: unknown): Mutation[] {
 		const changes: Record<string, unknown> =
 			typeof attributeOrChanges === 'string' ? { [attributeOrChanges]: value } : attributeOrChanges;
 		if (Object.keys(changes).length === 0) {
@@ -1605,12 +1621,221 @@ export class FactDatabase {
 			}
 		}
 
+		return mutations;
+	}
+
+	/** Diff-based update (design/02): commits the `planSet` diff in one transaction. */
+	private applyChanges(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		value?: unknown
+	): Fact[] {
+		const mutations =
+			typeof attributeOrChanges === 'string'
+				? this.planSet(eid, attributeOrChanges, value)
+				: this.planSet(eid, attributeOrChanges);
 		if (mutations.length === 0) {
 			return [];
 		}
-
 		return this.transact(mutations);
 	}
+
+	/**
+	 * eid-keyed reconcile (design/02): reconciles each entity to the given
+	 * attribute map in one transaction — one-valued attributes retract+add on
+	 * change, `null` removes the attribute, cardinality-many attributes
+	 * reconcile their member sets, and new values expand like `insert`
+	 * (arrays → cardinality-many facts, nested objects → ref entities, new
+	 * attributes auto-declared). Returns the entity ids aligned to input
+	 * order. Keys are strings (JSON ingestion); use `mergeEntity` for numeric
+	 * ids.
+	 */
+	merge(input: MergeMap): EntityId[] {
+		const plan = this.planMerge(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return plan.results;
+	}
+
+	/** Single-entity form of {@link merge}; accepts numeric or string ids. */
+	mergeEntity(eid: EntityId, attrs: InsertMap): EntityId {
+		const plan = this.planMergeEntity(eid, attrs);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries);
+		}
+		return plan.results[0];
+	}
+
+	/** Side-effect-free plan for {@link merge}: the entries it would commit, nothing is written. */
+	planMerge(input: MergeMap): MergePlan {
+		return this.planMergeEntities(Object.entries(input));
+	}
+
+	/** Side-effect-free plan for {@link mergeEntity}: the entries it would commit, nothing is written. */
+	planMergeEntity(eid: EntityId, attrs: InsertMap): MergePlan {
+		return this.planMergeEntities([[eid, attrs]]);
+	}
+
+	/**
+	 * Builds the merge plan for `[eid, attrs]` pairs: per attribute, the
+	 * current active values are diffed against the requested value using the
+	 * `set` semantics (design/02 §updates), while brand-new values follow the
+	 * `insert` expansion rules. Auto-declared schema and flattened refs are
+	 * part of the plan's entries.
+	 */
+	private planMergeEntities(entities: ReadonlyArray<readonly [EntityId, InsertMap]>): MergePlan {
+		const tempids = new Map<string, number>();
+		const identityMap = new Map<string, EntityId>();
+		const mutations: Mutation[] = [];
+		const declared = new Map<string, SchemaDeclaration>();
+		const results: EntityId[] = [];
+
+		for (const [eid, attrs] of entities) {
+			results.push(eid);
+			this.reconcileMap(eid, attrs, tempids, identityMap, mutations, declared);
+		}
+
+		return { entries: [...declared.values(), ...mutations], results };
+	}
+
+
+	private reconcileMap(
+		eid: EntityId,
+		attrs: InsertMap,
+		tempids: Map<string, number>,
+		identityMap: Map<string, EntityId>,
+		mutations: Mutation[],
+		declared: Map<string, SchemaDeclaration>
+	): void {
+		for (const [attribute, next] of Object.entries(attrs)) {
+			if (attribute === 'id') {
+				continue;
+			}
+
+			const schema = this.attributeSchemas.get(attribute);
+			const hasSchema = schema !== undefined;
+			const currentValues = this.activeValues(eid, attribute);
+
+			// null removes the attribute (every active value is retracted).
+			if (next === null) {
+				for (const currentValue of currentValues) {
+					mutations.push(['retract', eid, attribute, currentValue]);
+				}
+				continue;
+			}
+
+			// Nested object → ref entity (the current ref is replaced by a fresh child).
+			if (isPlainObjectValue(next)) {
+				assertNestedMapUsable(next, attribute);
+				this.declareSchema(declared, attribute, 'ref', 'one');
+				const childEid = this.nestedEid(next, tempids);
+				this.flattenMap(next, childEid, tempids, identityMap, mutations, declared);
+				this.reconcileOneValue(eid, attribute, currentValues, ref(childEid), mutations);
+				continue;
+			}
+
+			// Array of nested objects → ref-many (the member set is reconciled).
+			if (Array.isArray(next) && next.some((item) => isPlainObjectValue(item))) {
+				if (!next.every((item) => isPlainObjectValue(item))) {
+					throw new Error(
+						`Invalid value for ${attribute}: cannot mix nested objects and scalar values in one array`
+					);
+				}
+				this.declareSchema(declared, attribute, 'ref', 'many');
+				const target = new Map<string, unknown>();
+				for (const item of next) {
+					assertNestedMapUsable(item, attribute);
+					const childEid = this.nestedEid(item, tempids);
+					this.flattenMap(item, childEid, tempids, identityMap, mutations, declared);
+					target.set(valueKey(ref(childEid)), ref(childEid));
+				}
+				this.reconcileManyValues(eid, attribute, currentValues, [...target.values()], mutations);
+				continue;
+			}
+
+			// Scalar or array-of-scalars.
+			if (Array.isArray(next)) {
+				if (hasSchema && schema.cardinality === 'many') {
+					this.reconcileManyValues(
+						eid,
+						attribute,
+						currentValues,
+						next.map((item) => this.resolveInsertValueForKey(attribute, item, tempids, identityMap)),
+						mutations
+					);
+					continue;
+				}
+				if (!hasSchema && currentValues.length === 0) {
+					// Fresh attribute: expand like `insert` (arrays are cardinality-many).
+					this.declareSchema(declared, attribute, 'unknown', 'many');
+					for (const item of next) {
+						mutations.push([
+							'add',
+							eid,
+							attribute,
+							this.resolveInsertValueForKey(attribute, item, tempids, identityMap)
+						]);
+					}
+					continue;
+				}
+				// Cardinality-one (schema or existing facts without schema): stored verbatim.
+				this.reconcileOneValue(eid, attribute, currentValues, next, mutations);
+				continue;
+			}
+
+			// Plain scalar value.
+			const resolved = this.resolveInsertValueForKey(attribute, next, tempids, identityMap);
+			if (hasSchema && schema.cardinality === 'many') {
+				this.reconcileManyValues(eid, attribute, currentValues, [resolved], mutations);
+				continue;
+			}
+			if (!hasSchema && currentValues.length === 0) {
+				this.declareSchema(declared, attribute, 'unknown', 'one');
+			}
+			this.reconcileOneValue(eid, attribute, currentValues, resolved, mutations);
+		}
+	}
+
+	/** One-valued reconcile: retract the current value when it differs, then add `next`. */
+	private reconcileOneValue(
+		eid: EntityId,
+		attribute: string,
+		currentValues: unknown[],
+		next: unknown,
+		mutations: Mutation[]
+	): void {
+		const currentValue = currentValues[0];
+		if (currentValue !== undefined && !sameValue(currentValue, next)) {
+			mutations.push(['retract', eid, attribute, currentValue]);
+		}
+		if (currentValue === undefined || !sameValue(currentValue, next)) {
+			mutations.push(['add', eid, attribute, next]);
+		}
+	}
+
+	/** Cardinality-many reconcile: retract members absent from `nextValues`, add missing ones. */
+	private reconcileManyValues(
+		eid: EntityId,
+		attribute: string,
+		currentValues: unknown[],
+		nextValues: unknown[],
+		mutations: Mutation[]
+	): void {
+		const current = new Map<string, unknown>(currentValues.map((v) => [valueKey(v), v] as const));
+		const target = new Map<string, unknown>(nextValues.map((v) => [valueKey(v), v] as const));
+		for (const [key, currentValue] of current) {
+			if (!target.has(key)) {
+				mutations.push(['retract', eid, attribute, currentValue]);
+			}
+		}
+		for (const [key, nextValue] of target) {
+			if (!current.has(key)) {
+				mutations.push(['add', eid, attribute, nextValue]);
+			}
+		}
+	}
+
 
 	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
 		if (entries.length === 0) {

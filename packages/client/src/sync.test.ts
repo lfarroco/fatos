@@ -1298,6 +1298,82 @@ describe('SyncingClient write-through (G3)', () => {
 		expect(syncing.client.getFacts()).toContainEqual([1, 'user/name', 'Alice', 1, 'add']);
 		syncing.stop();
 	});
+
+	it('insert plans object maps against the mirror and POSTs the entries', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, {
+			facts: [['eid1', 'name', 'weee', 1, 'add']],
+			transaction: [1, 1000, null]
+		});
+
+		await syncing.insert({ id: 'eid1', name: 'weee' }, { source: 'test' });
+
+		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0]?.url).toBe('http://test/transact');
+		const body = JSON.parse(fake.calls[0]?.init?.body ?? '') as { entries: unknown[]; metadata?: unknown };
+		expect(body.metadata).toEqual({ source: 'test' });
+		// a flat scalar map plans to exactly the add mutation (arrays/refs would
+		// additionally auto-declare schema)
+		expect(body.entries).toEqual([['add', 'eid1', 'name', 'weee']]);
+		// planning is side-effect-free: nothing committed locally (no double-commit)
+		expect(syncing.client.getFacts()).toHaveLength(0);
+	});
+
+	it('set plans the diff against the mirror and POSTs the retract+add pair', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const mirror = createClient();
+		mirror.merge({ eid1: { name: 'weee', age: 33 } });
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			client: mirror,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, { facts: [], transaction: null });
+
+		await syncing.set('eid1', { name: 'wow' });
+
+		const body = JSON.parse(fake.calls[0]?.init?.body ?? '') as { entries: unknown[] };
+		expect(body.entries).toEqual([
+			['retract', 'eid1', 'name', 'weee'],
+			['add', 'eid1', 'name', 'wow']
+		]);
+		// the mirror still holds the pre-write state — the server commit + broadcast advance it
+		expect(mirror.entity('eid1')).toEqual({ id: 'eid1', name: 'weee', age: 33 });
+	});
+
+	it('merge plans the reconcile and POSTs it; mergeEntity plans the single form', async () => {
+		const harness = socketHarness();
+		const fake = fetchHarness();
+		const mirror = createClient();
+		mirror.merge({ eid1: { name: 'weee' } });
+		const syncing = createSyncingClient({
+			url: 'ws://test/ws',
+			createSocket: harness.factory,
+			client: mirror,
+			fetch: fake.fetch
+		});
+		fake.respond(true, 200, { facts: [], transaction: null });
+
+		await syncing.merge({ eid1: { name: 'wow', age: 33 } });
+		const mergeBody = JSON.parse(fake.calls[0]?.init?.body ?? '') as { entries: unknown[] };
+		expect(mergeBody.entries).toHaveLength(4);
+		expect(mergeBody.entries).toContainEqual({ ident: 'age', valueType: 'unknown', cardinality: 'one' });
+		expect(mergeBody.entries).toContainEqual(['retract', 'eid1', 'name', 'weee']);
+		expect(mergeBody.entries).toContainEqual(['add', 'eid1', 'name', 'wow']);
+		expect(mergeBody.entries).toContainEqual(['add', 'eid1', 'age', 33]);
+
+		await syncing.mergeEntity(2, { name: 'two' });
+		const entityBody = JSON.parse(fake.calls[1]?.init?.body ?? '') as { entries: unknown[] };
+		expect(entityBody.entries).toContainEqual(['add', 2, 'name', 'two']);
+	});
 });
 
 

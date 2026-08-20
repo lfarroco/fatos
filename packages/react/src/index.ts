@@ -19,10 +19,12 @@ import {
 	useEffect,
 	useMemo,
 	useRef,
+	useState,
 	useSyncExternalStore
 } from 'react';
 import {
 	createClient,
+	createSyncingClient,
 	type EntityId,
 	type EntityState,
 	type FatosClient,
@@ -30,6 +32,9 @@ import {
 	type LiveResult,
 	type QuerySpec,
 	type QueryTerm,
+	type SyncStatus,
+	type SyncingClient,
+	type SyncingClientOptions,
 	type TransactionRecord
 } from '@fatos/client';
 
@@ -52,6 +57,50 @@ export function useFatosClient(): FatosClient {
 	}
 
 	return client;
+}
+
+/**
+ * Creates a {@link SyncingClient} for `url` and mirrors its lifecycle into
+ * React state: the local mirror `client`, the `sync` handle (write-through
+ * `transact` / `insert` / `set` / `merge`), the connection `status`, and the
+ * latest `error`. `start()` is called on mount, `stop()` on unmount.
+ *
+ * The `options` are kept on a ref so an inline object per render never
+ * recreates the connection; only `url` changes re-sync. Status/error/client
+ * callbacks are owned by the hook.
+ */
+export function useSyncedClient(
+	url: string,
+	options?: Omit<SyncingClientOptions, 'url' | 'onStatusChange' | 'onError' | 'onClientReplaced'>
+): {
+	client: FatosClient | null;
+	sync: SyncingClient | null;
+	status: SyncStatus;
+	error: Error | null;
+} {
+	const [client, setClient] = useState<FatosClient | null>(null);
+	const [sync, setSync] = useState<SyncingClient | null>(null);
+	const [status, setStatus] = useState<SyncStatus>('idle');
+	const [error, setError] = useState<Error | null>(null);
+
+	const optionsRef = useRef(options);
+	optionsRef.current = options;
+
+	useEffect(() => {
+		const syncing = createSyncingClient({
+			url,
+			...optionsRef.current,
+			onStatusChange: (next) => setStatus(next),
+			onError: (next) => setError(next),
+			onClientReplaced: (next) => setClient(next)
+		});
+		setClient(syncing.client);
+		setSync(syncing);
+		syncing.start();
+		return () => syncing.stop();
+	}, [url]);
+
+	return { client, sync, status, error };
 }
 
 /**
@@ -147,5 +196,16 @@ export function useTransaction(): readonly TransactionRecord[] {
 	return useLiveValue([], () => client.live(() => client.getTransactions()));
 }
 
-export { createClient };
-export type { EntityId, EntityState, FatosClient, FindOptions, QuerySpec, QueryTerm, TransactionRecord };
+export { createClient, createSyncingClient };
+export type {
+	EntityId,
+	EntityState,
+	FatosClient,
+	FindOptions,
+	QuerySpec,
+	QueryTerm,
+	SyncStatus,
+	SyncingClient,
+	SyncingClientOptions,
+	TransactionRecord
+};

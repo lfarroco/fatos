@@ -14,6 +14,67 @@ Format:
 - **Description**: ...
 ```
 
+## [2026-08-19] core+client+server+react — `merge`/`mergeEntity` (eid-keyed reconcile)
+- **Task**: DX — JSON-style ingestion API: `merge({ eid: attrs })` in one
+  transaction (design/02 object grammar; see 02 §4b)
+- **Found by**: API review (packages/core, packages/client, packages/server)
+- **Severity**: low
+- **Status**: fixed
+- **Description**: The object-map authoring surface had no eid-keyed batch
+  form: `insert` is create-oriented (throws `Cardinality conflict` on a
+  changed one-value) and N updates needed N `set` calls. Added the
+  reconcile API:
+  - **Core**: `db.merge(map)` / `db.mergeEntity(eid, attrs)` — per entity,
+    `set`-style diff against current state (`null` removes, many-valued
+    reconcile member sets) + `insert`-style expansion for fresh values
+    (arrays → cardinality-many, nested objects → refs, auto-declared schema).
+    One transaction; returns eids aligned to input. `merge` keys are strings
+    (JSON ingestion); `mergeEntity` accepts numeric ids.
+  - **Planners**: public side-effect-free `planInsert` / `planSet` /
+    `planMerge` / `planMergeEntity` (the entries a write would commit,
+    nothing written) power the write-through sugar.
+  - **Surface**: `FatosClient` and `SyncingClient` (`sync.merge`,
+    `sync.mergeEntity`) and `FatosServer.insert/upsert/set/patch/merge/
+    mergeEntity` (event + persist path).
+- **Resolution**: core `merge.test.ts` (+12), client `authoring.test.ts`
+  (+12) and sync write-through tests (+3), server authoring tests (+4).
+  Validation: core 252, client 78, server 32, react 10, full suite 538 green;
+  lint clean; core/client/server/react dist rebuilt; app-ops-desk and
+  app-liveboard seeds now author with `server.insert(SEED_MAPS)`.
+
+---
+## [2026-08-19] client+react+apps — the client is the complete surface (drop the `{db, client}` duality)
+- **Task**: DX — bound-handle API parity: `FatosClient` mirrors core, so app
+  logic and the React layer share one handle
+- **Found by**: API review of the demo apps (app-replay `BoardDb`, ops-desk /
+  liveboard manual retract+add writes)
+- **Severity**: medium
+- **Status**: fixed
+- **Description**: `FatosClient` was missing the object-map authoring
+  surface (`insert`/`upsert`/`set`/`patch`) and core read parity
+  (`pull`/`diff`/`at`/`restore`), forcing apps to create and thread both a
+  `FactDatabase` and a `FatosClient` (`BoardDb = { db, client }` in
+  app-replay) and to hand-roll retract+add updates. Added:
+  - **`FatosClient`**: `insert`, `upsert`, `set`, `patch`, `merge`,
+    `mergeEntity` (through the event path via the core planners), plus
+    `pull`, `diff`, `at(tx)` (alias of `atTransaction`), `restore`, and a
+    public low-level `db` accessor. `atTransaction`/`atTime` views gained
+    `pull`.
+  - **`SyncingClient`**: write-through `insert`/`upsert`/`set`/`patch`/
+    `merge`/`mergeEntity` — planned against the live mirror, POSTed through
+    the existing `/transact` path (no double-commit).
+  - **`@fatos/react`**: `useSyncedClient(url, options?)` replaces the
+    duplicated ~25-line wiring in both demo apps.
+  - **Demo refactors**: ops-desk `adjust`/`advance` → `sync.set(...)`;
+    liveboard add/move → `sync.insert`/`sync.set`; app-replay dropped
+    `BoardDb` entirely (one `FatosClient` handle; `client.at`/`client.set`/
+    `client.restore`); seeds → `server.insert(SEED_MAPS)`; manual
+    `sortBy`/filter reads → `find` `orderBy`/`transactionFacts`.
+- **Resolution**: client `authoring.test.ts` (+12), sync write-through
+  tests (+3), react `useSyncedClient` test (+1), app-replay board tests
+  updated to the single handle. Validation: full suite 538 green, lint
+  clean, dists rebuilt, replay e2e (3/3) green in a real browser.
+
 ---
 ## [2026-08-17] core+client — G6: `db.transactionFacts(tx)` / `db.transaction(tx)` convenience
 - **Task**: G6 (P3) — Convenience for "facts committed by tx N" / tx metadata

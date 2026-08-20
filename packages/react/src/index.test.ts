@@ -12,6 +12,7 @@ import {
 	useEntity,
 	useFatosClient,
 	useQuery,
+	useSyncedClient,
 	useTransaction,
 	version
 } from './index';
@@ -277,6 +278,104 @@ describe('@fatos/react', () => {
 
 		// Prior records keep their identity inside the new snapshot.
 		expect(snapshots[1]?.[0]).toBe(initial[0]);
+	});
+});
+
+/** Wire-tagged sync frame helper. */
+function syncJson(message: unknown): string {
+	return JSON.stringify(message);
+}
+
+/** Minimal WebSocket surface the syncing client drives (mirrors the client test double). */
+class FakeSyncSocket {
+	readyState = 0;
+	sent: string[] = [];
+	private listeners = new Map<string, Array<(event: unknown) => void>>();
+
+	addEventListener(type: string, listener: (event: unknown) => void): void {
+		const set = this.listeners.get(type) ?? [];
+		set.push(listener);
+		this.listeners.set(type, set);
+	}
+
+	removeEventListener(type: string, listener: (event: unknown) => void): void {
+		const set = this.listeners.get(type);
+		if (!set) {
+			return;
+		}
+		this.listeners.set(
+			type,
+			set.filter((existing) => existing !== listener)
+		);
+	}
+
+	send(data: string): void {
+		this.sent.push(data);
+	}
+
+	close(): void {
+		if (this.readyState === 3) {
+			return;
+		}
+		this.readyState = 3;
+		this.emit('close', {});
+	}
+
+	open(): void {
+		this.readyState = 1;
+		this.emit('open', {});
+	}
+
+	message(data: string): void {
+		this.emit('message', { data });
+	}
+
+	private emit(type: string, event: unknown): void {
+		for (const listener of this.listeners.get(type) ?? []) {
+			listener(event);
+		}
+	}
+}
+
+describe('useSyncedClient', () => {
+	it('mirrors the syncing client lifecycle into React state', () => {
+		const snapshots: string[] = [];
+		let fakeSocket: FakeSyncSocket | null = null;
+
+		function Probe() {
+			const { client, sync, status } = useSyncedClient('ws://test/ws', {
+				createSocket: () => {
+					fakeSocket = new FakeSyncSocket();
+					return fakeSocket;
+				},
+				fetch: (async () => {
+					throw new Error('not used in this test');
+				}) as unknown as typeof fetch
+			});
+			snapshots.push(`${status}:${client !== null ? 'client' : '-'}:${sync !== null ? 'sync' : '-'}`);
+			return null;
+		}
+
+		const renderer = render(createElement(Probe));
+		// initial render, then the effect creates + starts the syncing client
+		expect(snapshots).toEqual(['idle:-:-', 'connecting:client:sync']);
+		expect(fakeSocket).not.toBeNull();
+
+		// socket opens and the server answers the sync frame → status synced
+		act(() => {
+			fakeSocket?.open();
+		});
+		const syncMessage = JSON.parse(fakeSocket?.sent[0] ?? '') as { id: string };
+		act(() => {
+			fakeSocket?.message(syncJson({ type: 'synced', id: syncMessage.id }));
+		});
+		expect(snapshots.at(-1)).toBe('synced:client:sync');
+
+		// unmount stops the sync client
+		act(() => {
+			renderer.unmount();
+		});
+		expect(fakeSocket?.readyState).toBe(3);
 	});
 });
 

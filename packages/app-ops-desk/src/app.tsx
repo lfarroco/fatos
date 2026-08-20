@@ -16,14 +16,19 @@
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import {
-	createSyncingClient,
 	type EntityId,
 	type EntityState,
 	type FatosClient,
 	type SyncStatus,
 	type SyncingClient
 } from '@fatos/client';
-import { FatosProvider, useFatosClient, useQuery, useTransaction } from '@fatos/react';
+import {
+	FatosProvider,
+	useFatosClient,
+	useQuery,
+	useSyncedClient,
+	useTransaction
+} from '@fatos/react';
 
 const DEFAULT_WS_URL = 'ws://localhost:4100/ws';
 
@@ -48,53 +53,16 @@ function useClientTick(client: FatosClient | null): void {
 	}, [client]);
 }
 
-function useSyncedClient(url: string): {
-	client: FatosClient | null;
-	sync: SyncingClient | null;
-	status: SyncStatus;
-	error: Error | null;
-} {
-	const [client, setClient] = useState<FatosClient | null>(null);
-	const [sync, setSync] = useState<SyncingClient | null>(null);
-	const [status, setStatus] = useState<SyncStatus>('idle');
-	const [error, setError] = useState<Error | null>(null);
-
-	useEffect(() => {
-		const sync = createSyncingClient({
-			url,
-			onStatusChange: (next) => setStatus(next),
-			onError: (next) => setError(next),
-			onClientReplaced: (next) => setClient(next)
-		});
-		setClient(sync.client);
-		setSync(sync);
-		sync.start();
-		return () => sync.stop();
-	}, [url]);
-
-	return { client, sync, status, error };
-}
-
-function sortBy(items: EntityState[], key: string): EntityState[] {
-	return [...items].sort((left, right) => String(left[key] ?? '').localeCompare(String(right[key] ?? '')));
-}
-
 function InventoryPanel({ sync }: { sync: SyncingClient }): ReactElement {
 	const client = useFatosClient();
-	const items = useQuery((db) => sortBy(db.find({ 'item/sku': { $exists: true } }), 'item/sku'));
+	const items = useQuery({ 'item/sku': { $exists: true } }, { orderBy: ['item/sku', 'asc'] });
 
 	const adjust = (eid: EntityId, delta: number): void => {
 		const current = client.entity(eid)?.['item/stock'];
 		if (typeof current !== 'number') {
 			return;
 		}
-		void sync.transact(
-			[
-				['retract', eid, 'item/stock', current],
-				['add', eid, 'item/stock', current + delta]
-			],
-			{ actor: 'ops-desk-user', action: 'adjust-stock', delta }
-		);
+		void sync.set(eid, { 'item/stock': current + delta }, { actor: 'ops-desk-user', action: 'adjust-stock', delta });
 	};
 
 	return (
@@ -131,7 +99,7 @@ function InventoryPanel({ sync }: { sync: SyncingClient }): ReactElement {
 }
 
 function OrdersPanel({ sync }: { sync: SyncingClient }): ReactElement {
-	const orders = useQuery((db) => sortBy(db.find({ 'order/status': { $exists: true } }), 'order/number'));
+	const orders = useQuery({ 'order/status': { $exists: true } }, { orderBy: ['order/number', 'asc'] });
 
 	const advance = (order: EntityState): void => {
 		const current = String(order['order/status'] ?? '');
@@ -139,11 +107,9 @@ function OrdersPanel({ sync }: { sync: SyncingClient }): ReactElement {
 		if (!next) {
 			return;
 		}
-		void sync.transact(
-			[
-				['retract', order.id, 'order/status', current],
-				['add', order.id, 'order/status', next]
-			],
+		void sync.set(
+			order.id,
+			{ 'order/status': next },
 			{ actor: 'ops-desk-user', action: 'order:transition', from: current, to: next }
 		);
 	};
@@ -250,9 +216,9 @@ function TimeTravelPanel(): ReactElement {
 	};
 
 	const atHead = tx >= headTx;
-	const items = sortBy(client.find({ 'item/sku': { $exists: true } }, tx), 'item/sku');
-	const orders = sortBy(client.find({ 'order/status': { $exists: true } }, tx), 'order/number');
-	const txFacts = tx > 0 ? client.getFacts().filter((fact) => fact[3] === tx) : [];
+	const items = client.find({ 'item/sku': { $exists: true } }, { tx, orderBy: ['item/sku', 'asc'] });
+	const orders = client.find({ 'order/status': { $exists: true } }, { tx, orderBy: ['order/number', 'asc'] });
+	const txFacts = tx > 0 ? client.transactionFacts(tx) : [];
 	const added = txFacts.filter((fact) => fact[4] === 'add');
 	const retracted = txFacts.filter((fact) => fact[4] === 'retract');
 

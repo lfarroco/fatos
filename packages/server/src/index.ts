@@ -18,12 +18,16 @@ import {
 	deserializeQuerySpec,
 	deserializeValue,
 	serializeValue,
+	type EntityId,
 	type Fact,
+	type InsertMap,
 	type LiveResult,
+	type MergeMap,
 	type Mutation,
 	type QuerySpec,
 	type QueryTerm,
 	type TransactionEntry,
+	type TransactionEntryInput,
 	type TransactionRecord
 } from '@fatos/core';
 
@@ -782,7 +786,7 @@ export class FatosServer {
 		client.send(JSON.stringify(payload));
 	}
 
-	transact(entries: TransactionEntry[], metadata?: Record<string, unknown>): Fact[] {
+	transact(entries: TransactionEntryInput[], metadata?: Record<string, unknown>): Fact[] {
 		const facts = this.db.transact(entries, metadata);
 		if (facts.length === 0) {
 			return facts;
@@ -803,6 +807,93 @@ export class FatosServer {
 			this.persist(transaction, facts);
 		}
 		return facts;
+	}
+
+	/** Object-map authoring (design/02): plans against the in-memory db, commits through the event/persist path. */
+	insert(input: InsertMap, metadata?: Record<string, unknown>): EntityId;
+	insert(input: InsertMap[], metadata?: Record<string, unknown>): EntityId[];
+	insert(input: InsertMap | InsertMap[], metadata?: Record<string, unknown>): EntityId | EntityId[] {
+		return this.insertMaps(input, metadata);
+	}
+
+	/** Write sugar: `insert` with the same semantics (core alias). */
+	upsert(input: InsertMap, metadata?: Record<string, unknown>): EntityId;
+	upsert(input: InsertMap[], metadata?: Record<string, unknown>): EntityId[];
+	upsert(input: InsertMap | InsertMap[], metadata?: Record<string, unknown>): EntityId | EntityId[] {
+		return this.insertMaps(input, metadata);
+	}
+
+	/** Commits a `planInsert` plan through the event/persist path (shared insert/upsert). */
+	private insertMaps(input: InsertMap | InsertMap[], metadata?: Record<string, unknown>): EntityId | EntityId[] {
+		const plan = this.db.planInsert(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries, metadata);
+		}
+		return Array.isArray(input) ? plan.results : plan.results[0];
+	}
+
+	/** Diff-based update (design/02): commits the retract+add diff through the event/persist path. */
+	set(eid: EntityId, attribute: string, value: unknown, metadata?: Record<string, unknown>): Fact[];
+	set(eid: EntityId, changes: Record<string, unknown>, metadata?: Record<string, unknown>): Fact[];
+	set(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, valueOrMetadata, metadata);
+	}
+
+	/** Write sugar: `set` with the same semantics (core alias). */
+	patch(eid: EntityId, attribute: string, value: unknown, metadata?: Record<string, unknown>): Fact[];
+	patch(eid: EntityId, changes: Record<string, unknown>, metadata?: Record<string, unknown>): Fact[];
+	patch(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Fact[] {
+		return this.applyChanges(eid, attributeOrChanges, valueOrMetadata, metadata);
+	}
+
+	/**
+	 * eid-keyed reconcile (design/02): reconciles each entity to the given
+	 * attribute map in one transaction. Keys are strings (JSON ingestion); use
+	 * `mergeEntity` for numeric ids.
+	 */
+	merge(input: MergeMap, metadata?: Record<string, unknown>): EntityId[] {
+		const plan = this.db.planMerge(input);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries, metadata);
+		}
+		return plan.results;
+	}
+
+	/** Single-entity form of {@link merge}; accepts numeric or string ids. */
+	mergeEntity(eid: EntityId, attrs: InsertMap, metadata?: Record<string, unknown>): EntityId {
+		const plan = this.db.planMergeEntity(eid, attrs);
+		if (plan.entries.length > 0) {
+			this.transact(plan.entries, metadata);
+		}
+		return plan.results[0];
+	}
+
+	private applyChanges(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Fact[] {
+		const mutations =
+			typeof attributeOrChanges === 'string'
+				? this.db.planSet(eid, attributeOrChanges, valueOrMetadata)
+				: this.db.planSet(eid, attributeOrChanges);
+		if (mutations.length === 0) {
+			return [];
+		}
+		const resolvedMetadata =
+			typeof attributeOrChanges === 'string' ? metadata : (valueOrMetadata as Record<string, unknown> | undefined);
+		return this.transact(mutations, resolvedMetadata);
 	}
 
 	/**

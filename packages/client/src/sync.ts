@@ -43,6 +43,8 @@ import type {
 	EntityId,
 	Fact,
 	FactOperation,
+	InsertMap,
+	MergeMap,
 	Mutation,
 	SchemaDeclaration,
 	TransactionEntryInput,
@@ -544,6 +546,90 @@ export class SyncingClient {
 	/** Write-through sugar for a single retract mutation. */
 	async retract(eid: EntityId, attribute: string, value: unknown): Promise<WriteResult> {
 		return this.transact([['retract', eid, attribute, value]]);
+	}
+
+	/**
+	 * Write-through object-map authoring: plans the insert against the live
+	 * mirror, then POSTs the resulting entries. The server commits and the
+	 * broadcast reaches this client's mirror through the sync path.
+	 */
+	async insert(input: InsertMap | InsertMap[], metadata?: Record<string, unknown>): Promise<WriteResult> {
+		const plan = this.clientInternal.db.planInsert(input);
+		if (plan.entries.length === 0) {
+			return { facts: [], transaction: null };
+		}
+		return this.transact(plan.entries, metadata);
+	}
+
+	/** Write-through sugar: `insert` with the same semantics (core alias). */
+	async upsert(input: InsertMap | InsertMap[], metadata?: Record<string, unknown>): Promise<WriteResult> {
+		return this.insert(input, metadata);
+	}
+
+	/** Write-through diff-based update: plans the retract+add diff against the mirror, then POSTs. */
+	async set(eid: EntityId, attribute: string, value: unknown, metadata?: Record<string, unknown>): Promise<WriteResult>;
+	async set(eid: EntityId, changes: Record<string, unknown>, metadata?: Record<string, unknown>): Promise<WriteResult>;
+	async set(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Promise<WriteResult> {
+		return this.applyChanges(eid, attributeOrChanges, valueOrMetadata, metadata);
+	}
+
+	/** Write-through sugar: `set` with the same semantics (core alias). */
+	async patch(eid: EntityId, attribute: string, value: unknown, metadata?: Record<string, unknown>): Promise<WriteResult>;
+	async patch(eid: EntityId, changes: Record<string, unknown>, metadata?: Record<string, unknown>): Promise<WriteResult>;
+	async patch(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Promise<WriteResult> {
+		return this.applyChanges(eid, attributeOrChanges, valueOrMetadata, metadata);
+	}
+
+	/** Write-through eid-keyed reconcile: plans the merge against the mirror, then POSTs. */
+	async merge(input: MergeMap, metadata?: Record<string, unknown>): Promise<WriteResult> {
+		const plan = this.clientInternal.db.planMerge(input);
+		if (plan.entries.length === 0) {
+			return { facts: [], transaction: null };
+		}
+		return this.transact(plan.entries, metadata);
+	}
+
+	/** Write-through single-entity merge (numeric or string ids). */
+	async mergeEntity(eid: EntityId, attrs: InsertMap, metadata?: Record<string, unknown>): Promise<WriteResult> {
+		const plan = this.clientInternal.db.planMergeEntity(eid, attrs);
+		if (plan.entries.length === 0) {
+			return { facts: [], transaction: null };
+		}
+		return this.transact(plan.entries, metadata);
+	}
+
+	/**
+	 * Shared `set`/`patch` implementation: plans the diff against the mirror
+	 * and POSTs it. Diffs are computed against the (live-synced) mirror, so a
+	 * write racing ahead of the last applied broadcast is read-then-write like
+	 * the manual retract+add pattern it replaces.
+	 */
+	private async applyChanges(
+		eid: EntityId,
+		attributeOrChanges: string | Record<string, unknown>,
+		valueOrMetadata?: unknown,
+		metadata?: Record<string, unknown>
+	): Promise<WriteResult> {
+		const mutations =
+			typeof attributeOrChanges === 'string'
+				? this.clientInternal.db.planSet(eid, attributeOrChanges, valueOrMetadata)
+				: this.clientInternal.db.planSet(eid, attributeOrChanges);
+		if (mutations.length === 0) {
+			return { facts: [], transaction: null };
+		}
+		const resolvedMetadata =
+			typeof attributeOrChanges === 'string' ? metadata : (valueOrMetadata as Record<string, unknown> | undefined);
+		return this.transact(mutations, resolvedMetadata);
 	}
 
 	private async handleWriteResponse(response: Response): Promise<WriteResult> {

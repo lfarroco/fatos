@@ -71,6 +71,59 @@ client.transact(
 );
 ```
 
+### Object-map authoring
+
+For ergonomic, JSON-style writes use `insert`, `set`, and `merge` — the object-map
+grammar (design/02). These go through the same transaction + event path as `transact`,
+so live queries and observers update exactly as with tuple entries.
+
+```ts
+// Create entities. `id` is optional (the engine allocates when omitted);
+// string ids are first-class; arrays become cardinality-many facts.
+const aliceId = client.insert({ 'user/name': 'Alice', 'user/tags': ['ts', 'db'] });
+const ids = client.insert([
+  { id: 'user:2', 'user/name': 'Bob', 'user/manager': ref(aliceId) }
+]);
+
+// Update an existing entity: `set` diffs against current state and emits
+// retract+add pairs in one transaction (`null` removes an attribute).
+client.set(aliceId, { 'user/name': 'Alicia' });
+client.patch(aliceId, { 'user/role': null });
+
+// Reconcile several entities from an eid-keyed map in one transaction —
+// ideal for ingesting a JSON document.
+client.merge({
+  'user:2': { 'user/name': 'Roberta', 'user/age': 33 },
+  'order:1': { 'order/item': ref(aliceId), 'order/status': 'placed' }
+});
+// merge keys are strings; for numeric entity ids use the single form:
+client.mergeEntity(1, { 'user/name': 'One' });
+```
+
+- `insert` is create-oriented — writing a different value to an existing
+  cardinality-one attribute throws (`Cardinality conflict`).
+- `merge`/`mergeEntity` reconcile — changed one-valued attributes retract+add,
+  `null` removes, many-valued attributes reconcile their member sets, and fresh
+  arrays / nested objects auto-declare schema like `insert`.
+- `upsert` is `insert` with the same semantics (identity-unique attributes
+  resolve to the existing entity).
+
+### Client reads and time travel (complete surface)
+
+`FatosClient` mirrors the core database API, so a single handle covers the whole
+surface — no need to also hold a raw `FactDatabase`:
+
+```ts
+const past = client.at(tx).find({ 'user/role': 'admin' }, { orderBy: ['user/name', 'asc'] });
+const diff = client.diff(tx - 1, tx);        // { added, retracted } for undo/diff UIs
+const nested = client.pull(aliceId, 'user.name user.manager.user.name');
+const snapshot = { facts: client.getFacts(), transactions: client.getTransactions() };
+client.restore(snapshot);                    // rebuild state from a snapshot
+```
+
+The low-level `client.db` handle is exposed for advanced use; prefer the client
+methods so `fact:added` / `transaction:committed` events fire.
+
 ## Read data
 
 ### Read an entity
@@ -222,7 +275,10 @@ await syncing.transact(
 The server commits the transaction and broadcasts it back over the sync
 socket; the local mirror applies the broadcast, so `syncing.client` (and any
 React bindings on it) sees the write without a manual refresh. `sync.add(...)`
-and `sync.retract(...)` are sugar for single-entry writes. Entry values are
+and `sync.retract(...)` are sugar for single-entry writes. The object-map
+authoring surface is available too — `sync.insert(maps)`, `sync.set(eid,
+changes)`, and `sync.merge({eid: attrs})` plan the write against the live
+mirror and POST the resulting entries (with metadata). Entry values are
 wire-tagged, so `Date` / `bigint` / ref values round-trip. See
 [sync-strategies.md](./sync-strategies.md) for the sync protocol details.
 
@@ -257,9 +313,14 @@ syncing.start();
 
 ```ts
 import type {
+  DatabaseSnapshot,
+  DiffResult,
   EntityState,
   Fact,
   FatosClient,
+  InsertMap,
+  MergeMap,
+  PullPath,
   QuerySpec,
   QueryTerm,
   TransactionEntry,

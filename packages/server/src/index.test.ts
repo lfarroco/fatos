@@ -1375,3 +1375,77 @@ describe('@fatos/server CORS', () => {
 	});
 });
 
+describe('server authoring surface (insert/upsert/set/merge)', () => {
+	it('insert commits object maps through the event path and returns aligned ids', () => {
+		const server = createFatosServer();
+		const events: string[] = [];
+		const unsubscribe = server.subscribe((event) => events.push(event.type));
+
+		const ids = server.insert(
+			[
+				{ id: 'eid1', name: 'weee' },
+				{ id: 'eid2', name: 'Bob' }
+			],
+			{ source: 'seed' }
+		);
+		expect(ids).toEqual(['eid1', 'eid2']);
+		expect(
+			server.query({
+				find: ['?e', '?name'],
+				where: [['?e', 'name', '?name']]
+			})
+		).toEqual([
+			['eid1', 'weee'],
+			['eid2', 'Bob']
+		]);
+		// one commit → one transaction event, two fact events
+		expect(events.filter((type) => type === 'transaction:committed')).toHaveLength(1);
+		expect(events.filter((type) => type === 'fact:added')).toHaveLength(2);
+		unsubscribe();
+	});
+
+	it('merge reconciles an existing entity; mergeEntity handles numeric ids', () => {
+		const server = createFatosServer();
+		server.insert({ id: 'eid1', name: 'weee', age: 33 });
+		expect(server.merge({ eid1: { name: 'wow' } })).toEqual(['eid1']);
+		expect(
+			server.query({
+				find: ['?e', '?name', '?age'],
+				where: [
+					['?e', 'name', '?name'],
+					['?e', 'age', '?age']
+				]
+			})
+		).toEqual([['eid1', 'wow', 33]]);
+
+		expect(server.mergeEntity(7, { name: 'seven' })).toBe(7);
+		expect(server.query({ find: ['?e'], where: [['?e', 'name', 'seven']] })).toEqual([[7]]);
+	});
+
+	it('set emits retract+add pairs through the event path', () => {
+		const server = createFatosServer();
+		const events: string[] = [];
+		const unsubscribe = server.subscribe((event) => events.push(event.type));
+		server.insert({ id: 'eid1', name: 'weee' });
+		events.length = 0;
+
+		server.set('eid1', { name: 'wow' });
+		expect(events).toEqual(['fact:retracted', 'fact:added', 'transaction:committed']);
+		unsubscribe();
+	});
+
+	it('persists object-map writes through the storage adapter', async () => {
+		const storage = new MemoryAdapter();
+		const server = createFatosServer({ storage });
+		await server.start({ port: 0 });
+		try {
+			server.insert({ id: 'eid1', name: 'weee' });
+			await server.flush();
+			const snapshot = await storage.load();
+			expect(snapshot.facts).toContainEqual(['eid1', 'name', 'weee', 1, 'add']);
+		} finally {
+			await server.stop();
+		}
+	});
+});
+

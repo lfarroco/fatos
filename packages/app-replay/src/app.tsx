@@ -5,8 +5,8 @@
  * "visual editor", but the point is the substrate: undo, scrub, step-diff and
  * snapshot round-trips come from the fact log, not from bespoke state code.
  *
- * - Scrubber reads `readBoardAt(db, tx)` → `db.at(tx)` under the hood,
- * - "This step" renders `db.diff(tx - 1, tx)`,
+ * - Scrubber reads `readBoardAt(board, tx)` → `board.at(tx)` under the hood,
+ * - "This step" renders `board.diff(tx - 1, tx)`,
  * - Undo applies the inverse of a step's diff (history is kept, not erased),
  * - Export/import round-trips the whole log through the core wire tags,
  * - `installSnapshotPublisher` bridges the board to the Fatos DevTools panel.
@@ -16,6 +16,7 @@ import type { ChangeEvent, PointerEvent as ReactPointerEvent, ReactElement } fro
 import { installSnapshotPublisher } from '@fatos/devtools';
 import { serializeValue, type EntityId } from '@fatos/core';
 import { FatosProvider, useTransaction } from '@fatos/react';
+import type { FatosClient } from '@fatos/client';
 import {
 	addEdge,
 	addNode,
@@ -28,7 +29,6 @@ import {
 	moveNode,
 	readBoardAt,
 	renameNode,
-	type BoardDb,
 	type BoardNode,
 	type UserAction
 } from './board';
@@ -55,8 +55,8 @@ function useClientTick(client: { subscribe(listener: () => void): () => void }):
 	useEffect(() => client.subscribe(() => setTick((tick) => tick + 1)), [client]);
 }
 
-function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb) => void }): ReactElement {
-	const { db, client } = board;
+function Board({ board, onReplace }: { board: FatosClient; onReplace: (next: FatosClient) => void }): ReactElement {
+	const client = board;
 
 	const [scrubTx, setScrubTx] = useState<number | null>(null);
 	const [selected, setSelected] = useState<EntityId | null>(null);
@@ -77,12 +77,12 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 	useClientTick(client);
 	const transactions = useTransaction();
 
-	const head = headTx(db);
+	const head = headTx(board);
 	const activeTx = scrubTx === null ? head : scrubTx;
 	const atHead = activeTx === head;
 
-	const { nodes, edges } = useMemo(() => readBoardAt(db, activeTx), [db, activeTx]);
-	const stepFacts = useMemo(() => (activeTx > 0 ? db.transactionFacts(activeTx) : []), [db, activeTx]);
+	const { nodes, edges } = useMemo(() => readBoardAt(board, activeTx), [board, activeTx]);
+	const stepFacts = useMemo(() => (activeTx > 0 ? board.transactionFacts(activeTx) : []), [board, activeTx]);
 	const stepAdded = stepFacts.filter((fact) => fact[4] === 'add');
 	const stepRetracted = stepFacts.filter((fact) => fact[4] === 'retract');
 	const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
@@ -90,13 +90,13 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 
 	/** Runs a write inside the undo wrapper: diff the step, remember its inverse. */
 	const apply = (perform: () => void, label: string): void => {
-		const before = headTx(db);
+		const before = headTx(board);
 		perform();
-		const after = headTx(db);
+		const after = headTx(board);
 		if (after === before) {
 			return;
 		}
-		const step = db.diff(before, after);
+		const step = board.diff(before, after);
 		if (step.added.length === 0 && step.retracted.length === 0) {
 			return;
 		}
@@ -106,10 +106,10 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 	};
 
 	const handleAddNode = (): void => {
-		const current = readBoardAt(db, headTx(db));
+		const current = readBoardAt(board, headTx(board));
 		const x = 60 + (current.nodes.length % 5) * 120;
 		const y = 60 + Math.floor(current.nodes.length / 5) * 90;
-		apply(() => addNode(db, x, y), 'add node');
+		apply(() => addNode(board, x, y), 'add node');
 	};
 
 	const handleUndo = (): void => {
@@ -117,7 +117,7 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 		if (!entry) {
 			return;
 		}
-		apply(() => db.transact(entry.inverse, { app: 'replay', action: 'undo' }), `undo ${entry.label}`);
+		apply(() => board.transact(entry.inverse, { app: 'replay', action: 'undo' }), `undo ${entry.label}`);
 		setUndoStack((stack) => stack.slice(0, -1));
 	};
 
@@ -125,21 +125,21 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 		if (fromId === null || toId === null || fromId === toId) {
 			return;
 		}
-		apply(() => addEdge(db, fromId, toId), 'add edge');
+		apply(() => addEdge(board, fromId, toId), 'add edge');
 	};
 
 	const handleRename = (): void => {
 		if (selected === null || labelDraft.trim() === '') {
 			return;
 		}
-		apply(() => renameNode(db, selected, labelDraft.trim()), 'rename node');
+		apply(() => renameNode(board, selected, labelDraft.trim()), 'rename node');
 	};
 
 	const handleDelete = (): void => {
 		if (selected === null) {
 			return;
 		}
-		apply(() => deleteNode(db, selected), 'delete node');
+		apply(() => deleteNode(board, selected), 'delete node');
 		setSelected(null);
 	};
 
@@ -150,15 +150,15 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 	};
 
 	const handleExport = (): void => {
-		const json = exportSnapshot(db);
+		const json = exportSnapshot(board);
 		const blob = new Blob([json], { type: 'application/json' });
 		const url = URL.createObjectURL(blob);
 		const anchor = document.createElement('a');
 		anchor.href = url;
-		anchor.download = `replay-tx${headTx(db)}.json`;
+		anchor.download = `replay-tx${headTx(board)}.json`;
 		anchor.click();
 		URL.revokeObjectURL(url);
-		setMessage(`exported tx 1..${headTx(db)} (${db.getFacts().length} facts)`);
+		setMessage(`exported tx 1..${headTx(board)} (${board.getFacts().length} facts)`);
 	};
 
 	const handleImportFile = (event: ChangeEvent<HTMLInputElement>): void => {
@@ -174,7 +174,7 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 				setScrubTx(null);
 				setSelected(null);
 				setUndoStack([]);
-				setMessage(`imported ${next.db.getFacts().length} facts / ${next.db.getTransactions().length} txs`);
+				setMessage(`imported ${next.getFacts().length} facts / ${next.getTransactions().length} txs`);
 			})
 			.catch((error: unknown) => {
 				setMessage(`import failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -215,7 +215,7 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 		const { x, y } = preview;
 		setDrag(null);
 		setPreview(null);
-		apply(() => moveNode(db, id, x, y), 'move node');
+		apply(() => moveNode(board, id, x, y), 'move node');
 	};
 
 	return (
@@ -387,15 +387,15 @@ function Board({ board, onReplace }: { board: BoardDb; onReplace: (next: BoardDb
 }
 
 export function App(): ReactElement {
-	const [board, setBoard] = useState<BoardDb>(() => createBoard());
+	const [board, setBoard] = useState<FatosClient>(() => createBoard());
 
 	useEffect(() => {
-		const publisher = installSnapshotPublisher(board.client);
+		const publisher = installSnapshotPublisher(board);
 		return () => publisher.dispose();
-	}, [board.client]);
+	}, [board]);
 
 	return (
-		<FatosProvider client={board.client}>
+		<FatosProvider client={board}>
 			<div className="app">
 				<header>
 					<h1>Replay — flow builder with time travel</h1>
